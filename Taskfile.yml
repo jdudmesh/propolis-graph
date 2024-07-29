@@ -1,0 +1,9 @@
+version: "3"
+
+dotenv:
+  - ".env"
+
+tasks:
+  build/rpc:
+    cmds:
+      - protoc -I=./rpc --go_out=paths=source_relative:./rpc rpc/propolis/v1/*.proto

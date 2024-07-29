@@ -1,0 +1,94 @@
+package hub
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"math/big"
+
+	"github.com/quic-go/quic-go"
+)
+
+const defaultHubPort = 9000
+
+type worker struct {
+	quit     chan struct{}
+	hostAddr string
+}
+
+func New(configHost string, configPort int) (*worker, error) {
+	if configHost == "" {
+		configHost = "localhost"
+	}
+	if configPort == 0 {
+		configPort = defaultHubPort
+	}
+
+	return &worker{
+		quit:     make(chan struct{}),
+		hostAddr: fmt.Sprintf("%s:%d", configHost, configPort),
+	}, nil
+}
+
+func (h *worker) Run() error {
+	listener, err := quic.ListenAddr(h.hostAddr, generateTLSConfig(), nil)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	conn, err := listener.Accept(context.Background())
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(conn.RemoteAddr().String())
+
+	stream, err := conn.AcceptStream(context.Background())
+	if err != nil {
+		panic(err)
+	}
+	defer stream.Close()
+
+	// Echo through the loggingWriter
+	_, err = io.Copy(loggingWriter{stream}, stream)
+	return err
+	return nil
+}
+
+// A wrapper for io.Writer that also logs the message.
+type loggingWriter struct{ io.Writer }
+
+func (w loggingWriter) Write(b []byte) (int, error) {
+	fmt.Printf("Server: Got '%s'\n", string(b))
+	return w.Writer.Write(b)
+}
+
+// Setup a bare-bones TLS config for the server
+func generateTLSConfig() *tls.Config {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		panic(err)
+	}
+	template := x509.Certificate{SerialNumber: big.NewInt(1)}
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		panic(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		panic(err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		NextProtos:   []string{"quic-echo-example"},
+	}
+}

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package propolis.v1;
+
+option go_package = "github.com/jdudmesh/propolis/rpc/propolis/v1";
+
+message Envelope {
+  string sender = 1;
+  string content_type = 2;
+  bytes payload = 3;
+  bytes signature = 4;
+}
+
+message Ping {
+  int64 timestamp = 1;
+}
+
+message Pong {
+  int64 timestamp = 1;
+  int64 rt_timestamp = 2;
+}
+
+message Subscribe {
+  repeated string subscriptions = 1;
+}
