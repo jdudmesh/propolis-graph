@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"io"
 	"math/big"
 
 	"github.com/quic-go/quic-go"
@@ -17,8 +16,9 @@ import (
 const defaultHubPort = 9000
 
 type worker struct {
-	quit     chan struct{}
-	hostAddr string
+	hostAddr    string
+	quit        chan struct{}
+	connections []*clientConnection
 }
 
 func New(configHost string, configPort int) (*worker, error) {
@@ -35,41 +35,41 @@ func New(configHost string, configPort int) (*worker, error) {
 	}, nil
 }
 
-func (h *worker) Run() error {
-	listener, err := quic.ListenAddr(h.hostAddr, generateTLSConfig(), nil)
+func (w *worker) Run() error {
+	listener, err := quic.ListenAddr(w.hostAddr, generateTLSConfig(), nil)
 	if err != nil {
 		return err
 	}
 	defer listener.Close()
 
-	conn, err := listener.Accept(context.Background())
-	if err != nil {
-		return err
+	fmt.Println("Waiting for connections on: " + w.hostAddr)
+
+	ctx, cancelFn := context.WithCancel(context.Background())
+	defer cancelFn()
+
+	for {
+		conn, err := listener.Accept(ctx)
+		if err != nil {
+			return err
+		}
+
+		s, err := conn.AcceptStream(ctx)
+		if err != nil {
+			return err
+		}
+
+		client := &clientConnection{stm: s}
+		w.connections = append(w.connections, client)
+
+		go client.Run()
 	}
+}
 
-	fmt.Println(conn.RemoteAddr().String())
-
-	stream, err := conn.AcceptStream(context.Background())
-	if err != nil {
-		panic(err)
-	}
-	defer stream.Close()
-
-	// Echo through the loggingWriter
-	_, err = io.Copy(loggingWriter{stream}, stream)
-	return err
+func (w *worker) Close() error {
+	close(w.quit)
 	return nil
 }
 
-// A wrapper for io.Writer that also logs the message.
-type loggingWriter struct{ io.Writer }
-
-func (w loggingWriter) Write(b []byte) (int, error) {
-	fmt.Printf("Server: Got '%s'\n", string(b))
-	return w.Writer.Write(b)
-}
-
-// Setup a bare-bones TLS config for the server
 func generateTLSConfig() *tls.Config {
 	key, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -89,6 +89,6 @@ func generateTLSConfig() *tls.Config {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"quic-echo-example"},
+		NextProtos:   []string{"propolis"},
 	}
 }

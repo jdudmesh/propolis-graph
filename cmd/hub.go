@@ -44,7 +44,10 @@ var hubCmd = &cobra.Command{
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			h.Run()
+			err := h.Run()
+			if err != nil {
+				fmt.Println(err)
+			}
 		}()
 		wg.Wait()
 

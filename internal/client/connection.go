@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jdudmesh/propolis/internal/hub"
 	rpc "github.com/jdudmesh/propolis/rpc/propolis/v1"
 	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/proto"
@@ -22,13 +23,15 @@ const (
 type hubConnection struct {
 	hubAddr string
 	state   atomic.Int32
+	conn    quic.Connection
 	stm     quic.Stream
 }
 
 func (h *hubConnection) Connect(subscrtiptions []string) error {
+	var err error
 	h.state.Store(stateConnecting)
 
-	ctx, cancelFn := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancelFn := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancelFn()
 
 	tlsConf := &tls.Config{
@@ -36,15 +39,13 @@ func (h *hubConnection) Connect(subscrtiptions []string) error {
 		NextProtos:         []string{"propolis"},
 	}
 
-	conn, err := quic.DialAddr(ctx, h.hubAddr, tlsConf, nil)
+	h.conn, err = quic.DialAddr(ctx, h.hubAddr, tlsConf, nil)
 	if err != nil {
 		h.state.Store(stateNotConnected)
 		return err
 	}
 
-	defer conn.CloseWithError(0, "")
-
-	h.stm, err = conn.OpenStreamSync(ctx)
+	h.stm, err = h.conn.OpenStreamSync(ctx)
 	if err != nil {
 		h.state.Store(stateNotConnected)
 		return err
@@ -57,6 +58,12 @@ func (h *hubConnection) Connect(subscrtiptions []string) error {
 func (h *hubConnection) Disconnect() error {
 	h.state.Store(stateNotConnected)
 
+	if h.conn != nil {
+		return nil
+	}
+	h.conn.CloseWithError(0, "normal shutdown")
+	h.conn = nil
+
 	if h.stm == nil {
 		return nil
 	}
@@ -65,6 +72,8 @@ func (h *hubConnection) Disconnect() error {
 	if err != nil {
 		return err
 	}
+
+	h.stm = nil
 
 	return nil
 }
@@ -111,7 +120,8 @@ func (h *hubConnection) SendSubscriptions(subs []string) error {
 	}
 
 	e := &rpc.Envelope{
-		Payload: payload,
+		ContentType: hub.ContentTypeSubscribe,
+		Payload:     payload,
 	}
 
 	r, err := proto.Marshal(e)
