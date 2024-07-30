@@ -5,19 +5,17 @@ package propolis.v1;
 option go_package = "github.com/jdudmesh/propolis/rpc/propolis/v1";
 
 message Envelope {
-  string sender = 1;
-  string content_type = 2;
-  bytes payload = 3;
-  bytes signature = 4;
+  string id = 1;
+  string in_reply_to = 2;
+  int64 timestamp = 3;
+  string sender = 4;
+  string content_type = 5;
+  bytes payload = 6;
+  bytes signature = 7;
 }
 
-message Ping {
-  int64 timestamp = 1;
-}
-
-message Pong {
-  int64 timestamp = 1;
-  int64 rt_timestamp = 2;
+message Error {
+  string message = 1;
 }
 
 message SubscribeRequest {
@@ -25,5 +23,6 @@ message SubscribeRequest {
 }
 
 message SubscribeResponse {
-  repeated string peers = 1;
+  repeated string hubs = 1;
+  repeated string peers = 2;
 }

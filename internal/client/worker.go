@@ -1,9 +1,9 @@
 package client
 
 import (
+	"context"
+	"log/slog"
 	"time"
-
-	"github.com/OneOfOne/xxhash"
 )
 
 type datastore interface {
@@ -15,7 +15,6 @@ type worker struct {
 	hubs        []string
 	connections []*hubConnection
 	quit        chan struct{}
-	lastSubs    uint64
 }
 
 func New(s datastore, hubs []string) (*worker, error) {
@@ -28,11 +27,17 @@ func New(s datastore, hubs []string) (*worker, error) {
 
 func (w *worker) Run() error {
 	for _, h := range w.hubs {
-		cn := &hubConnection{hubAddr: h}
-		w.connections = append(w.connections, cn)
-	}
+		ctx, cancelFn := context.WithTimeout(context.Background(), 100*time.Second)
+		defer cancelFn()
 
-	w.CheckConnections()
+		hub, err := Connect(ctx, h)
+		if err != nil {
+			slog.Error("connecting to hub", "error", err)
+			continue
+		}
+
+		w.connections = append(w.connections, hub)
+	}
 
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
@@ -49,7 +54,7 @@ func (w *worker) Run() error {
 
 func (w *worker) Close() error {
 	for _, cn := range w.connections {
-		cn.Disconnect()
+		cn.Close()
 	}
 	close(w.quit)
 	return nil
@@ -57,21 +62,7 @@ func (w *worker) Close() error {
 
 func (w *worker) CheckConnections() {
 	subs := w.store.GetSubscriptions()
-	hasher := xxhash.New64()
-	for _, s := range subs {
-		hasher.WriteString(s)
-	}
-	h := hasher.Sum64()
-	shouldSendSubscriptions := h != w.lastSubs
-
-	for _, cn := range w.connections {
-		if cn.state.Load() == stateNotConnected {
-			cn.Connect(subs)
-		}
-		if shouldSendSubscriptions {
-			cn.SendSubscriptions(subs)
-		} else {
-			cn.Ping()
-		}
+	for _, c := range w.connections {
+		c.Subscribe(subs)
 	}
 }

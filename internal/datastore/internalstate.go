@@ -3,7 +3,7 @@ package datastore
 import (
 	"fmt"
 
-	"github.com/jdudmesh/propolis/internal/model"
+	"github.com/jdudmesh/propolis/internal/peer"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -34,7 +34,7 @@ func NewInternalState() (*internalStateStore, error) {
 func createStateSchema(db *sqlx.DB) error {
 	_, err := db.Exec(`
 		create table connections (
-			id text not null primary key,
+			stream_id int not null primary key,
 			created_at datetime not null,
 			updated_at datetime null,
 			host_addr text not null
@@ -61,10 +61,10 @@ func createStateSchema(db *sqlx.DB) error {
 	return nil
 }
 
-func (s *internalStateStore) CreateConnection(cn model.ClientConnection) error {
+func (s *internalStateStore) CreatePeer(cn *peer.Connection) error {
 	_, err := s.db.NamedExec(`
 		INSERT INTO connections (
-			id,
+			stream_id,
 			status,
 			created_at,
 			parent_id,
@@ -77,7 +77,7 @@ func (s *internalStateStore) CreateConnection(cn model.ClientConnection) error {
 			private_key,
 			mfa_secret)
 		VALUES (
-			:id,
+			:stream_id,
 			:status,
 			:created_at,
 			:parent_id,
@@ -93,12 +93,12 @@ func (s *internalStateStore) CreateConnection(cn model.ClientConnection) error {
 	return err
 }
 
-func (s *internalStateStore) RefreshConnection(cn model.ClientConnection) error {
+func (s *internalStateStore) RefreshPeer(cn *peer.Connection) error {
 	_, err := s.db.NamedExec(`
-		update connections 
+		update connections
 		set updated_at = :updated_at,
 		status = :status
-		where id = :id
+		where stream_id = :stream_id
 `, cn)
 
 	return err

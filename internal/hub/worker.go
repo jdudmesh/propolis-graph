@@ -11,15 +11,15 @@ import (
 	"log/slog"
 	"math/big"
 
-	"github.com/jdudmesh/propolis/internal/model"
+	"github.com/jdudmesh/propolis/internal/peer"
 	"github.com/quic-go/quic-go"
 )
 
 const defaultHubPort = 9000
 
 type internalStateStore interface {
-	CreateConnection(cn model.ClientConnection) error
-	RefreshConnection(cn model.ClientConnection) error
+	CreatePeer(cn *peer.Connection) error
+	RefreshPeer(cn *peer.Connection) error
 }
 
 type worker struct {
@@ -51,12 +51,12 @@ func (w *worker) Run() error {
 	}
 	defer listener.Close()
 
-	refreshChannel := make(chan model.ClientConnection)
+	refreshChannel := make(chan *peer.Connection)
 	defer close(refreshChannel)
 
 	go func() {
 		for c := range refreshChannel {
-			err := w.store.RefreshConnection(c)
+			err := w.store.RefreshPeer(c)
 			if err != nil {
 				slog.Error("refreshing channel", "error", err)
 			}
@@ -73,27 +73,25 @@ func (w *worker) Run() error {
 			return err
 		}
 
-		s, err := conn.AcceptStream(ctx)
+		client, err := Accept(ctx, conn)
 		if err != nil {
 			return err
 		}
 
-		client, err := NewClientConn(s)
-		if err != nil {
-			return err
-		}
-
-		err = w.store.CreateConnection(client.ClientConnection)
+		err = w.store.CreatePeer(client.Connection())
 		if err != nil {
 			return err
 		}
 		w.connections = append(w.connections, client)
 
-		go client.Run()
+		go client.Connection().Run()
 	}
 }
 
 func (w *worker) Close() error {
+	for _, cn := range w.connections {
+		cn.Close()
+	}
 	close(w.quit)
 	return nil
 }
