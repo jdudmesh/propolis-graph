@@ -10,18 +10,24 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/quic-go/quic-go"
 )
 
 const defaultHubPort = 9000
 
+type internalStateStore interface {
+	CreateConnection(cn model.ClientConnection) error
+}
+
 type worker struct {
 	hostAddr    string
+	store       internalStateStore
 	quit        chan struct{}
 	connections []*clientConnection
 }
 
-func New(configHost string, configPort int) (*worker, error) {
+func New(configHost string, configPort int, store internalStateStore) (*worker, error) {
 	if configHost == "" {
 		configHost = "localhost"
 	}
@@ -30,8 +36,9 @@ func New(configHost string, configPort int) (*worker, error) {
 	}
 
 	return &worker{
-		quit:     make(chan struct{}),
 		hostAddr: fmt.Sprintf("%s:%d", configHost, configPort),
+		store:    store,
+		quit:     make(chan struct{}),
 	}, nil
 }
 
@@ -58,7 +65,15 @@ func (w *worker) Run() error {
 			return err
 		}
 
-		client := &clientConnection{stm: s}
+		client, err := NewClientConn(s)
+		if err != nil {
+			return err
+		}
+
+		err = w.store.CreateConnection(client.ClientConnection)
+		if err != nil {
+			return err
+		}
 		w.connections = append(w.connections, client)
 
 		go client.Run()

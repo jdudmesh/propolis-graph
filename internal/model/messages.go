@@ -1,6 +1,24 @@
 package model
 
-type Message struct {
-	ID      string
-	Command string
+import "time"
+
+type ConnectionStatus int
+type HostType int
+
+const (
+	ConnectionStatusNotConnected ConnectionStatus = iota
+	ConnectionStatusConnecting
+	ConnectionStatusDisconnecting
+	ConnectionStatusConnected
+
+	HostTypeHub HostType = iota
+	HostTypeClient
+)
+
+type ClientConnection struct {
+	Id          string           `db:"id"`
+	CreatedAt   time.Time        `db:"created_at"`
+	UpdatedAt   time.Time        `db:"updated_at"`
+	Status      ConnectionStatus `db:"status"`
+	HostAddress string           `db:"host_addr"`
 }

@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"strings"
+	"time"
 
+	"github.com/jdudmesh/propolis/internal/model"
 	rpc "github.com/jdudmesh/propolis/rpc/propolis/v1"
+	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/proto"
 )
@@ -27,7 +30,23 @@ var handlers = map[string]handlerFunc{
 }
 
 type clientConnection struct {
+	model.ClientConnection
 	stm quic.Stream
+}
+
+func NewClientConn(stm quic.Stream) (*clientConnection, error) {
+	id, err := gonanoid.New()
+	if err != nil {
+		return nil, err
+	}
+
+	return &clientConnection{
+		model.ClientConnection{
+			Id:        id,
+			CreatedAt: time.Now().UTC(),
+		},
+		stm,
+	}, nil
 }
 
 func (c *clientConnection) Run() error {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/jdudmesh/propolis/internal/hub"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -34,7 +35,13 @@ var hubCmd = &cobra.Command{
 		c := Config{}
 		viper.Unmarshal(&c)
 		fmt.Printf("port: %d\n", c.Port)
-		h, err := hub.New(c.Host, c.Port)
+
+		stateStore, err := datastore.NewInternalState()
+		if err != nil {
+			return
+		}
+
+		h, err := hub.New(c.Host, c.Port, stateStore)
 		if err != nil {
 			fmt.Println(err.Error())
 			return
