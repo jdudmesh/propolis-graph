@@ -5,6 +5,7 @@ go 1.22.0
 require (
 	github.com/OneOfOne/xxhash v1.2.8
 	github.com/jmoiron/sqlx v1.4.0
+	github.com/matoous/go-nanoid/v2 v2.1.0
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/quic-go/quic-go v0.45.1
 	github.com/spf13/cobra v1.8.1
@@ -19,7 +20,6 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/matoous/go-nanoid/v2 v2.1.0 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect

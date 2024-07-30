@@ -91,10 +91,15 @@ func (s *internalStateStore) CreateConnection(cn model.ClientConnection) error {
 			:mfa_secret)`, cn)
 
 	return err
-
-	return nil
 }
 
-func (s *internalStateStore) UpdateConnection(cn model.ClientConnection) error {
-	return nil
+func (s *internalStateStore) RefreshConnection(cn model.ClientConnection) error {
+	_, err := s.db.NamedExec(`
+		update connections 
+		set updated_at = :updated_at,
+		status = :status
+		where id = :id
+`, cn)
+
+	return err
 }

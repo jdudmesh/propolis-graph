@@ -13,7 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-type handlerFunc func(payload []byte) error
+type handlerFunc func(c *clientConnection, payload []byte) error
 
 const (
 	ContentTypeError     = "x-propolis/error"
@@ -23,10 +23,10 @@ const (
 )
 
 var handlers = map[string]handlerFunc{
-	ContentTypeError:     func(payload []byte) error { return nil },
-	ContentTypePing:      func(payload []byte) error { return nil },
-	ContentTypePong:      func(payload []byte) error { return nil },
-	ContentTypeSubscribe: func(payload []byte) error { return nil },
+	ContentTypeError:     func(c *clientConnection, payload []byte) error { return nil },
+	ContentTypePing:      func(c *clientConnection, payload []byte) error { return nil },
+	ContentTypePong:      func(c *clientConnection, payload []byte) error { return nil },
+	ContentTypeSubscribe: func(c *clientConnection, payload []byte) error { return nil },
 }
 
 type clientConnection struct {
@@ -44,6 +44,8 @@ func NewClientConn(stm quic.Stream) (*clientConnection, error) {
 		model.ClientConnection{
 			Id:        id,
 			CreatedAt: time.Now().UTC(),
+			Status:    model.ConnectionStatusConnected,
+			HostType:  model.HostTypeClient,
 		},
 		stm,
 	}, nil
@@ -94,10 +96,32 @@ func (c *clientConnection) Process(buf []byte) error {
 	if handler, ok := handlers[ct]; !ok {
 		return errors.New("unknowm content type")
 	} else {
-		err := handler(e.Payload)
+		err := handler(c, e.Payload)
 		if err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func handleError(c *clientConnection, payload []byte) error {
+	return nil
+}
+
+func handlePing(c *clientConnection, payload []byte) error {
+	return nil
+}
+
+func handlePong(c *clientConnection, payload []byte) error {
+	return nil
+}
+
+func handleSubscribe(c *clientConnection, payload []byte) error {
+	e := &rpc.SubscribeRequest{}
+	err := proto.Unmarshal(payload, e)
+	if err != nil {
+		return err
 	}
 
 	return nil

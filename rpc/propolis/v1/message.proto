@@ -20,6 +20,10 @@ message Pong {
   int64 rt_timestamp = 2;
 }
 
-message Subscribe {
+message SubscribeRequest {
   repeated string subscriptions = 1;
+}
+
+message SubscribeResponse {
+  repeated string peers = 1;
 }

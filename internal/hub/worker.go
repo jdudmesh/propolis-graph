@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"math/big"
 
 	"github.com/jdudmesh/propolis/internal/model"
@@ -18,6 +19,7 @@ const defaultHubPort = 9000
 
 type internalStateStore interface {
 	CreateConnection(cn model.ClientConnection) error
+	RefreshConnection(cn model.ClientConnection) error
 }
 
 type worker struct {
@@ -49,8 +51,19 @@ func (w *worker) Run() error {
 	}
 	defer listener.Close()
 
-	fmt.Println("Waiting for connections on: " + w.hostAddr)
+	refreshChannel := make(chan model.ClientConnection)
+	defer close(refreshChannel)
 
+	go func() {
+		for c := range refreshChannel {
+			err := w.store.RefreshConnection(c)
+			if err != nil {
+				slog.Error("refreshing channel", "error", err)
+			}
+		}
+	}()
+
+	fmt.Println("Waiting for connections on: " + w.hostAddr)
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 
