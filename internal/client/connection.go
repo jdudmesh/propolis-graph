@@ -48,7 +48,7 @@ func (h *hubConnection) Close() error {
 }
 
 func (h *hubConnection) Subscribe(subs []string) error {
-	msg := &rpc.SubscribeRequest{
+	msg := &rpc.Subscribe{
 		Subscriptions: subs,
 	}
 	return h.conn.Dispatch(peer.ContentTypeSubscribe, msg, "")

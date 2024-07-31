@@ -12,21 +12,25 @@ import (
 	"math/big"
 
 	"github.com/jdudmesh/propolis/internal/peer"
+	rpc "github.com/jdudmesh/propolis/rpc/propolis/v1"
 	"github.com/quic-go/quic-go"
 )
 
 const defaultHubPort = 9000
 
 type internalStateStore interface {
-	CreatePeer(cn *peer.Connection) error
-	RefreshPeer(cn *peer.Connection) error
+	UpsertHub(h peer.HubSpec) error
+	GetHubs() ([]*peer.HubSpec, error)
+	UpsertPeer(p peer.PeerSpec) error
+	UpsertSubscription(s peer.SubscriptionSpec) error
+	FindPeersBySubscription(s string) ([]*peer.PeerSpec, error)
 }
 
 type worker struct {
 	hostAddr    string
 	store       internalStateStore
 	quit        chan struct{}
-	connections []*clientConnection
+	connections map[quic.StreamID]*clientConnection
 }
 
 func New(configHost string, configPort int, store internalStateStore) (*worker, error) {
@@ -38,9 +42,10 @@ func New(configHost string, configPort int, store internalStateStore) (*worker, 
 	}
 
 	return &worker{
-		hostAddr: fmt.Sprintf("%s:%d", configHost, configPort),
-		store:    store,
-		quit:     make(chan struct{}),
+		hostAddr:    fmt.Sprintf("%s:%d", configHost, configPort),
+		store:       store,
+		quit:        make(chan struct{}),
+		connections: make(map[quic.StreamID]*clientConnection),
 	}, nil
 }
 
@@ -51,14 +56,29 @@ func (w *worker) Run() error {
 	}
 	defer listener.Close()
 
-	refreshChannel := make(chan *peer.Connection)
-	defer close(refreshChannel)
+	upsertPeer := make(chan peer.PeerSpec)
+	defer close(upsertPeer)
+
+	upsertSubs := make(chan peer.SubscriptionSpec)
+	defer close(upsertSubs)
 
 	go func() {
-		for c := range refreshChannel {
-			err := w.store.RefreshPeer(c)
-			if err != nil {
-				slog.Error("refreshing channel", "error", err)
+		for {
+			select {
+			case p := <-upsertPeer:
+				err := w.store.UpsertPeer(p)
+				if err != nil {
+					slog.Error("refreshing peer", "error", err)
+				}
+			case s := <-upsertSubs:
+				err := w.store.UpsertSubscription(s)
+				if err != nil {
+					slog.Error("refreshing subscription", "error", err)
+				}
+				err = w.broadcastSubscriptions(s)
+				if err != nil {
+					slog.Error("broadcastings subscription", "error", err)
+				}
 			}
 		}
 	}()
@@ -73,18 +93,14 @@ func (w *worker) Run() error {
 			return err
 		}
 
-		client, err := Accept(ctx, conn)
+		client, err := Accept(ctx, conn, upsertPeer, upsertSubs)
 		if err != nil {
 			return err
 		}
 
-		err = w.store.CreatePeer(client.Connection())
-		if err != nil {
-			return err
-		}
-		w.connections = append(w.connections, client)
+		w.connections[client.conn.StreamID()] = client
 
-		go client.Connection().Run()
+		go client.Run()
 	}
 }
 
@@ -93,6 +109,44 @@ func (w *worker) Close() error {
 		cn.Close()
 	}
 	close(w.quit)
+	return nil
+}
+
+func (w *worker) broadcastSubscriptions(s peer.SubscriptionSpec) error {
+	hubs, err := w.store.GetHubs()
+	if err != nil {
+		return err
+	}
+
+	hubsList := make([]string, 0, len(hubs))
+	for _, h := range hubs {
+		hubsList = append(hubsList, h.HostAddr)
+	}
+
+	peers, err := w.store.FindPeersBySubscription(s.Subscription)
+	if err != nil {
+		return err
+	}
+
+	peerList := make([]string, 0, len(peers))
+	for _, p := range peers {
+		peerList = append(peerList, p.HostAddr)
+	}
+
+	msg := &rpc.SubscriptionUpdate{
+		Hubs:  hubsList,
+		Peers: peerList,
+	}
+
+	for _, p := range peers {
+		if cn, ok := w.connections[p.StreamID]; ok {
+			err := cn.conn.Dispatch(peer.ContentTypeSubscribe, msg, "")
+			if err != nil {
+				slog.Error("sending subs update", "error", err, "StreamID", cn.conn.StreamID())
+			}
+		}
+	}
+
 	return nil
 }
 

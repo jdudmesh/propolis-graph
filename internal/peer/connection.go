@@ -14,6 +14,25 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+type HubSpec struct {
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+	HostAddr  string    `db:"host_addr"`
+}
+
+type PeerSpec struct {
+	CreatedAt time.Time     `db:"created_at"`
+	UpdatedAt time.Time     `db:"updated_at"`
+	StreamID  quic.StreamID `db:"stream_id"`
+	HostAddr  string        `db:"host_addr"`
+}
+
+type SubscriptionSpec struct {
+	PeerSpec
+	ID           string `db:"id"`
+	Subscription string `db:"spec"`
+}
+
 type HandlerFunc func(msg *rpc.Envelope) error
 
 const (
@@ -56,6 +75,14 @@ func New(t PeerType, cn quic.Connection, stm quic.Stream, state ConnectionStatus
 	}
 	c.SetState(state)
 	return c
+}
+
+func (c *Connection) StreamID() quic.StreamID {
+	return c.stream.StreamID()
+}
+
+func (c *Connection) HostAddr() string {
+	return c.conn.RemoteAddr().String()
 }
 
 func (c *Connection) State() ConnectionStatus {

@@ -18,11 +18,11 @@ message Error {
   string message = 1;
 }
 
-message SubscribeRequest {
+message Subscribe {
   repeated string subscriptions = 1;
 }
 
-message SubscribeResponse {
+message SubscriptionUpdate {
   repeated string hubs = 1;
   repeated string peers = 2;
 }

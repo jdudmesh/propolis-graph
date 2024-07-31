@@ -37,6 +37,7 @@ func (w *worker) Run() error {
 		}
 
 		w.connections = append(w.connections, hub)
+		w.CheckConnections()
 	}
 
 	t := time.NewTicker(time.Minute)
