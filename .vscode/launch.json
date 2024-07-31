@@ -5,21 +5,12 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "hub",
+      "name": "peer",
       "type": "go",
       "request": "launch",
       "mode": "auto",
       "program": "${workspaceFolder}/main.go",
-      "args": ["hub"]
+      "args": ["peer"]
     },
-    {
-      "name": "client",
-      "type": "go",
-      "request": "launch",
-      "mode": "auto",
-      "program": "${workspaceFolder}/main.go",
-      "args": ["client"]
-    }
-
   ]
 }

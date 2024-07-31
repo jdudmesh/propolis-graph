@@ -62,6 +62,9 @@ func init() {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
+	viper.SetDefault("host", "0.0.0.0")
+	viper.SetDefault("port", "9090")
+
 	if cfgFile != "" {
 		viper.SetConfigFile(cfgFile)
 	} else {
@@ -79,7 +82,7 @@ func initConfig() {
 }
 
 type Config struct {
-	Host string
-	Port int
-	Hubs []string
+	Host  string
+	Port  int
+	Peers []string
 }

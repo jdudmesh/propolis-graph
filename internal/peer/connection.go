@@ -2,186 +2,279 @@ package peer
 
 import (
 	"bytes"
-	"errors"
-	"strings"
-	"sync/atomic"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"net"
+	"net/http"
 	"time"
 
-	rpc "github.com/jdudmesh/propolis/rpc/propolis/v1"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
+	"github.com/quic-go/quic-go/http3"
 )
-
-type HubSpec struct {
-	CreatedAt time.Time `db:"created_at"`
-	UpdatedAt time.Time `db:"updated_at"`
-	HostAddr  string    `db:"host_addr"`
-}
-
-type PeerSpec struct {
-	CreatedAt time.Time     `db:"created_at"`
-	UpdatedAt time.Time     `db:"updated_at"`
-	StreamID  quic.StreamID `db:"stream_id"`
-	HostAddr  string        `db:"host_addr"`
-}
-
-type SubscriptionSpec struct {
-	PeerSpec
-	ID           string `db:"id"`
-	Subscription string `db:"spec"`
-}
-
-type HandlerFunc func(msg *rpc.Envelope) error
 
 const (
-	ContentTypeError     = "x-propolis/error"
-	ContentTypePing      = "x-propolis/ping"
-	ContentTypePong      = "x-propolis/pong"
-	ContentTypeSubscribe = "x-propolis/subscribe"
+	ContentTypeJSON = "application/json"
 )
 
-type ConnectionStatus int
-type PeerType int
-
-const (
-	ConnectionStatusNotConnected ConnectionStatus = iota
-	ConnectionStatusConnecting
-	ConnectionStatusDisconnecting
-	ConnectionStatusConnected
-
-	Hub PeerType = iota
-	Client
-)
-
-type Connection struct {
-	CreatedAt time.Time  `db:"created_at"`
-	UpdatedAt *time.Time `db:"updated_at"`
-	Type      PeerType   `db:"peer_type"`
-	Handlers  map[string]HandlerFunc
-	conn      quic.Connection
-	stream    quic.Stream
-	state     atomic.Int32
+type peerStore interface {
+	GetPeers() ([]string, error)
+	GetSubs() ([]string, error)
 }
 
-func New(t PeerType, cn quic.Connection, stm quic.Stream, state ConnectionStatus) *Connection {
-	c := &Connection{
-		CreatedAt: time.Now().UTC(),
-		Type:      t,
-		conn:      cn,
-		stream:    stm,
-		state:     atomic.Int32{},
+type peer struct {
+	nodeID string
+	host   string
+	port   int
+	store  peerStore
+	server *http3.Server
+	client *http.Client
+	quit   chan struct{}
+}
+
+func New(host string, port int, store peerStore) (*peer, error) {
+	nodeID, err := gonanoid.New()
+	if err != nil {
+		return nil, fmt.Errorf("generating node id: %w", err)
 	}
-	c.SetState(state)
-	return c
+
+	p := &peer{
+		nodeID: nodeID,
+		host:   host,
+		port:   port,
+		store:  store,
+		quit:   make(chan struct{}),
+	}
+
+	p.server = &http3.Server{
+		Handler: p.newServeMux(),
+	}
+
+	return p, nil
 }
 
-func (c *Connection) StreamID() quic.StreamID {
-	return c.stream.StreamID()
+func (p *peer) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /subscription", p.handleCreateSubscription)
+	mux.HandleFunc("DELETE /subscription", p.handleDeleteSubscription)
+	mux.HandleFunc("POST /action", p.handleCreateAction)
+	mux.HandleFunc("POST /ping", p.handlePing)
+	mux.HandleFunc("POST /pong", p.handlePong)
+	return mux
 }
 
-func (c *Connection) HostAddr() string {
-	return c.conn.RemoteAddr().String()
-}
+func (p *peer) Run() error {
+	defer p.server.CloseGracefully(10 * time.Second)
 
-func (c *Connection) State() ConnectionStatus {
-	return ConnectionStatus(c.state.Load())
-}
+	addr := &net.UDPAddr{IP: net.ParseIP(p.host), Port: p.port}
+	slog.Info("starting listener", "addr", addr)
 
-func (c *Connection) SetState(s ConnectionStatus) {
-	c.state.Store(int32(s))
-}
+	udpConn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return fmt.Errorf("creating sock: %w", err)
+	}
 
-func (c *Connection) Run() error {
-	for {
-		if c.stream.Context().Err() != nil {
-			break
-		}
+	tr := quic.Transport{
+		Conn: udpConn,
+	}
+	defer tr.Close()
 
-		buf := bytes.NewBuffer(make([]byte, 0))
-
-		for {
-			b := make([]byte, 1024)
-			n, err := c.stream.Read(b)
+	roundTripper := &http3.RoundTripper{
+		TLSClientConfig: &tls.Config{
+			NextProtos:         []string{"h3", "propolis"},
+			InsecureSkipVerify: true,
+		},
+		QUICConfig: &quic.Config{}, // QUIC connection options
+		Dial: func(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config) (quic.EarlyConnection, error) {
+			slog.Debug("dialing", "addr", addr)
+			a, err := net.ResolveUDPAddr("udp", addr)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			buf.Write(b[:n])
-			if n < len(b) {
-				break
+			return tr.DialEarly(ctx, a, tlsConf, quicConf)
+		},
+	}
+	defer roundTripper.Close()
+
+	p.client = &http.Client{
+		Transport: roundTripper,
+	}
+
+	listener, err := tr.ListenEarly(p.generateTLSConfig(), nil)
+	if err != nil {
+		return fmt.Errorf("setting up listener sock: %w", err)
+	}
+
+	go func() {
+		err := p.server.ServeListener(listener)
+		if err != nil {
+			slog.Error("closing peer server", "error", err)
+		}
+	}()
+
+	err = p.refreshSubscriptions()
+	if err != nil {
+		return fmt.Errorf("refreshing subscriptions: %w", err)
+	}
+
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
+
+	for {
+		select {
+		case <-t.C:
+			err := p.refreshSubscriptions()
+			if err != nil {
+				slog.Error("refreshing subscriptions", "error", err)
+			}
+			roundTripper.CloseIdleConnections()
+		case <-p.quit:
+			return nil
+		}
+	}
+}
+
+func (p *peer) Close() error {
+	close(p.quit)
+	return nil
+}
+
+func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request) {
+}
+
+func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
+}
+
+func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
+}
+
+func (p *peer) handlePing(w http.ResponseWriter, req *http.Request) {
+	slog.Info("ping", "remote", req.RemoteAddr)
+
+	resp, err := p.client.Post(fmt.Sprintf("https://%s/pong", req.RemoteAddr), ContentTypeJSON, nil)
+	if err != nil {
+		slog.Error("sending pong", "error", err, "remote", req.RemoteAddr)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("bad pong response", "remote", req.RemoteAddr)
+	}
+}
+
+func (p *peer) handlePong(w http.ResponseWriter, req *http.Request) {
+	slog.Info("pong", "remote", req.RemoteAddr)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (p *peer) pingPeers() error {
+	peers, err := p.store.GetPeers()
+	if err != nil {
+		return fmt.Errorf("fetching peers: %w", err)
+	}
+	for _, peer := range peers {
+		resp, err := p.client.Post(fmt.Sprintf("https://%s/ping", peer), ContentTypeJSON, nil)
+		if err != nil {
+			slog.Error("sending ping", "error", err, "remote", peer)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			slog.Error("bad pong response", "remote", peer)
+		}
+	}
+
+	return nil
+}
+
+func (p *peer) refreshSubscriptions() error {
+	peers, err := p.store.GetPeers()
+	if err != nil {
+		return fmt.Errorf("fetching peers: %w", err)
+	}
+	subs, err := p.store.GetSubs()
+	if err != nil {
+		return fmt.Errorf("fetching subs: %w", err)
+	}
+
+	for _, sub := range subs {
+		for _, peer := range peers {
+			err = p.sendSub(peer, sub)
+			if err != nil {
+				slog.Error("refreshing sub", "error", err, "peer", peer, "sub", sub)
+				continue
 			}
 		}
-
-		c.Process(buf.Bytes())
 	}
 
 	return nil
 }
 
-func (c *Connection) Close() error {
-	return c.stream.Close()
+type SubscriptionRequest struct {
+	Spec string `json:"spec"`
 }
 
-func (c *Connection) Process(buf []byte) error {
-	e := &rpc.Envelope{}
-	err := proto.Unmarshal(buf, e)
+type SubscriptionResponse struct {
+	ID    string   `json:"id"`
+	Spec  string   `json:"spec"`
+	Peers []string `json:"peers"`
+}
+
+func (p *peer) sendSub(peer, sub string) error {
+	params := SubscriptionRequest{
+		Spec: sub,
+	}
+	data, err := json.Marshal(&params)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshalling subscription req: %w", err)
 	}
 
-	f := strings.Split(e.ContentType, ";")
-	if len(f) == 0 {
-		return errors.New("bad content type")
+	buf := bytes.NewBuffer(data)
+	resp, err := p.client.Post(fmt.Sprintf("https://%s/subscription", peer), ContentTypeJSON, buf)
+	if err != nil {
+		return fmt.Errorf("sending subscription req: %w", err)
 	}
-	ct := strings.ToLower(strings.TrimSpace(f[0]))
-	if handler, ok := c.Handlers[ct]; !ok {
-		return errors.New("unknowm content type")
-	} else {
-		err := handler(e)
-		if err != nil {
-			return err
-		}
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("failed to create subscription")
 	}
 
 	return nil
 }
 
-func (c *Connection) Dispatch(contentType string, payload protoreflect.ProtoMessage, inReplyToID string) error {
-	var err error
-
-	data := []byte{}
-	if payload != nil {
-		data, err = proto.Marshal(payload)
-		if err != nil {
-			return err
-		}
-	}
-
-	id, err := gonanoid.New()
+func (p *peer) generateTLSConfig() *tls.Config {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return err
+		panic(err)
 	}
-
-	msg := &rpc.Envelope{
-		Id:          id,
-		InReplyTo:   inReplyToID,
-		Timestamp:   time.Now().UTC().UnixNano(),
-		Sender:      "xxx",
-		ContentType: ContentTypePong,
-		Payload:     data,
-		Signature:   []byte{},
+	template := x509.Certificate{
+		Subject: pkix.Name{
+			CommonName: p.nodeID,
+		},
+		SerialNumber: big.NewInt(1),
 	}
-
-	data, err = proto.Marshal(msg)
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if err != nil {
-		return err
+		panic(err)
 	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
-	_, err = c.stream.Write(data)
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return err
+		panic(err)
 	}
-
-	return nil
+	return &tls.Config{
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{tlsCert},
+		NextProtos:         []string{"h3", "propolis"},
+	}
 }

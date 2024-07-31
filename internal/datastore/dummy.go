@@ -9,16 +9,17 @@ var dummySubs = []string{
 }
 
 type dummyStore struct {
+	peers []string
 }
 
-func NewDummy() *dummyStore {
-	return &dummyStore{}
+func NewDummy(peers []string) (*dummyStore, error) {
+	return &dummyStore{peers}, nil
 }
 
-func (d dummyStore) GetHubs() []string {
-	return []string{"127.0.0.1:9090"}
+func (d dummyStore) GetPeers() ([]string, error) {
+	return d.peers, nil
 }
 
-func (d dummyStore) GetSubscriptions() []string {
-	return []string{"SUBSCRIBE 1"}
+func (d dummyStore) GetSubs() ([]string, error) {
+	return []string{"SUBSCRIBE 1"}, nil
 }

@@ -18,27 +18,31 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
-	"github.com/jdudmesh/propolis/internal/client"
 	"github.com/jdudmesh/propolis/internal/datastore"
+	"github.com/jdudmesh/propolis/internal/peer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
-// clientCmd represents the serve command
-var clientCmd = &cobra.Command{
-	Use:   "client",
-	Short: "Run as propolis root server",
-	Long:  `A longer description that spans multiple lines and likely contains examples.`,
+var peerCmd = &cobra.Command{
+	Use:   "peer",
+	Short: "Propolis peer",
+	Long:  `Run propolis in peer mode`,
 	Run: func(cmd *cobra.Command, args []string) {
 		c := Config{}
 		viper.Unmarshal(&c)
 
-		s := datastore.NewDummy()
-		h, err := client.New(s, c.Hubs)
+		stateStore, err := datastore.NewDummy(c.Peers)
 		if err != nil {
-			fmt.Println(err.Error())
+			return
+		}
+
+		h, err := peer.New(c.Host, c.Port, stateStore)
+		if err != nil {
+			slog.Error("creating peer", "error", err)
 			return
 		}
 
@@ -56,15 +60,5 @@ var clientCmd = &cobra.Command{
 }
 
 func init() {
-	baseCmd.AddCommand(clientCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// serveCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// serveCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	baseCmd.AddCommand(peerCmd)
 }
