@@ -35,7 +35,7 @@ var peerCmd = &cobra.Command{
 		c := Config{}
 		viper.Unmarshal(&c)
 
-		stateStore, err := datastore.NewDummy(c.Peers)
+		stateStore, err := datastore.NewInternalState(c.Peers)
 		if err != nil {
 			return
 		}
@@ -60,5 +60,8 @@ var peerCmd = &cobra.Command{
 }
 
 func init() {
+	peerCmd.Flags().Int("port", 9090, "Peer listen port")
+	viper.BindPFlag("port", peerCmd.Flags().Lookup("port"))
+
 	baseCmd.AddCommand(peerCmd)
 }

@@ -2,8 +2,6 @@ package model
 
 import (
 	"time"
-
-	"github.com/quic-go/quic-go"
 )
 
 type HubSpec struct {
@@ -13,23 +11,25 @@ type HubSpec struct {
 }
 
 type PeerSpec struct {
-	CreatedAt time.Time     `db:"created_at"`
-	UpdatedAt time.Time     `db:"updated_at"`
-	StreamID  quic.StreamID `db:"stream_id"`
-	HostAddr  string        `db:"host_addr"`
+	RemoteAddr string    `db:"remote_addr"`
+	CreatedAt  time.Time `db:"created_at"`
+	UpdatedAt  time.Time `db:"updated_at"`
 }
 
 type SubscriptionSpec struct {
 	PeerSpec
-	ID           string `db:"id"`
-	Subscription string `db:"spec"`
+	Spec string `db:"spec"`
 }
 
 const (
+	ContentTypeHeader = "Content-Type"
+
 	ContentTypeError     = "x-propolis/error"
 	ContentTypePing      = "x-propolis/ping"
 	ContentTypePong      = "x-propolis/pong"
 	ContentTypeSubscribe = "x-propolis/subscribe"
+
+	ContentTypeJSON = "application/json; utf-8"
 )
 
 type ConnectionStatus int

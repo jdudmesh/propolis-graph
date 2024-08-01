@@ -17,18 +17,17 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jdudmesh/propolis/internal/model"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
-const (
-	ContentTypeJSON = "application/json"
-)
-
 type peerStore interface {
-	GetPeers() ([]string, error)
-	GetSubs() ([]string, error)
+	GetPeers() ([]*model.PeerSpec, error)
+	GetSubs() ([]*model.SubscriptionSpec, error)
+	UpsertSubs(remoteAddr string, subs []string) error
+	FindPeersBySub(sub string) ([]*model.PeerSpec, error)
 }
 
 type peer struct {
@@ -149,6 +148,48 @@ func (p *peer) Close() error {
 }
 
 func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request) {
+	params := model.SubscriptionRequest{}
+
+	body := req.Body
+	defer body.Close()
+
+	dec := json.NewDecoder(body)
+	err := dec.Decode(&params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = p.store.UpsertSubs(req.RemoteAddr, params.Spec)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	resp := &model.SubscriptionResponse{
+		Peers: make(map[string][]string),
+	}
+
+	for _, s := range params.Spec {
+		peers, err := p.store.FindPeersBySub(s)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		resp.Peers[s] = make([]string, len(peers))
+		for i, peer := range peers {
+			resp.Peers[s][i] = peer.RemoteAddr
+		}
+	}
+
+	data, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(data)
+	w.WriteHeader(http.StatusCreated)
 }
 
 func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
@@ -160,13 +201,29 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 func (p *peer) handlePing(w http.ResponseWriter, req *http.Request) {
 	slog.Info("ping", "remote", req.RemoteAddr)
 
-	resp, err := p.client.Post(fmt.Sprintf("https://%s/pong", req.RemoteAddr), ContentTypeJSON, nil)
+	resp := model.PingResponse{
+		Address: req.RemoteAddr,
+	}
+
+	data, err := json.Marshal(&resp)
 	if err != nil {
-		slog.Error("sending pong", "error", err, "remote", req.RemoteAddr)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Add(model.ContentTypeHeader, model.ContentTypeJSON)
+	w.Write(data)
+}
+
+func (p *peer) sendPong(addr string) {
+	resp, err := p.client.Post(fmt.Sprintf("https://%s/pong", addr), model.ContentTypeJSON, nil)
+	if err != nil {
+		slog.Error("sending pong", "error", err, "remote", addr)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Error("bad pong response", "remote", req.RemoteAddr)
+		slog.Error("bad pong response", "remote", addr)
 	}
 }
 
@@ -181,7 +238,7 @@ func (p *peer) pingPeers() error {
 		return fmt.Errorf("fetching peers: %w", err)
 	}
 	for _, peer := range peers {
-		resp, err := p.client.Post(fmt.Sprintf("https://%s/ping", peer), ContentTypeJSON, nil)
+		resp, err := p.client.Post(fmt.Sprintf("https://%s/ping", peer), model.ContentTypeJSON, nil)
 		if err != nil {
 			slog.Error("sending ping", "error", err, "remote", peer)
 			continue
@@ -200,45 +257,39 @@ func (p *peer) refreshSubscriptions() error {
 	if err != nil {
 		return fmt.Errorf("fetching peers: %w", err)
 	}
+
 	subs, err := p.store.GetSubs()
 	if err != nil {
 		return fmt.Errorf("fetching subs: %w", err)
 	}
+	specs := make([]string, len(subs))
+	for i, s := range subs {
+		specs[i] = s.Spec
+	}
 
-	for _, sub := range subs {
-		for _, peer := range peers {
-			err = p.sendSub(peer, sub)
-			if err != nil {
-				slog.Error("refreshing sub", "error", err, "peer", peer, "sub", sub)
-				continue
-			}
+	for _, peer := range peers {
+		err = p.sendSub(peer.RemoteAddr, specs)
+		if err != nil {
+			slog.Error("refreshing sub", "error", err, "peer", peer, "subs", subs)
+			continue
 		}
 	}
 
 	return nil
 }
 
-type SubscriptionRequest struct {
-	Spec string `json:"spec"`
-}
-
-type SubscriptionResponse struct {
-	ID    string   `json:"id"`
-	Spec  string   `json:"spec"`
-	Peers []string `json:"peers"`
-}
-
-func (p *peer) sendSub(peer, sub string) error {
-	params := SubscriptionRequest{
-		Spec: sub,
+func (p *peer) sendSub(peer string, subs []string) error {
+	params := model.SubscriptionRequest{
+		Spec: subs,
 	}
+
 	data, err := json.Marshal(&params)
 	if err != nil {
 		return fmt.Errorf("marshalling subscription req: %w", err)
 	}
 
 	buf := bytes.NewBuffer(data)
-	resp, err := p.client.Post(fmt.Sprintf("https://%s/subscription", peer), ContentTypeJSON, buf)
+	resp, err := p.client.Post(fmt.Sprintf("https://%s/subscription", peer), model.ContentTypeJSON, buf)
 	if err != nil {
 		return fmt.Errorf("sending subscription req: %w", err)
 	}

@@ -1,174 +1,225 @@
 package datastore
 
-// import (
-// 	"fmt"
+import (
+	"context"
+	"fmt"
+	"time"
 
-// 	"github.com/jdudmesh/propolis/internal/peer"
-// 	"github.com/jmoiron/sqlx"
-// 	_ "github.com/mattn/go-sqlite3"
-// )
+	"github.com/jdudmesh/propolis/internal/model"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/mattn/go-sqlite3"
+)
 
-// type internalStateStore struct {
-// 	db *sqlx.DB
-// }
+type internalStateStore struct {
+	db *sqlx.DB
+}
 
-// func NewInternalState() (*internalStateStore, error) {
-// 	db, err := sqlx.Connect("sqlite3", "file::memory:?cache=shared")
-// 	if err != nil {
-// 		return nil, fmt.Errorf("connecting to database: %w", err)
-// 	}
+func NewInternalState(seeds []string) (*internalStateStore, error) {
+	db, err := sqlx.Connect("sqlite3", "file::memory:?cache=shared")
+	if err != nil {
+		return nil, fmt.Errorf("connecting to database: %w", err)
+	}
 
-// 	err = createStateSchema(db)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("creating schema: %w", err)
-// 	}
+	err = createStateSchema(db)
+	if err != nil {
+		return nil, fmt.Errorf("creating schema: %w", err)
+	}
 
-// 	store := &internalStateStore{
-// 		db,
-// 	}
+	store := &internalStateStore{
+		db,
+	}
 
-// 	return store, nil
+	return store, nil
 
-// }
+}
 
-// func createStateSchema(db *sqlx.DB) error {
-// 	_, err := db.Exec(`
-// 		create table hubs (
-// 			host_addr text not null primary key,
-// 			created_at datetime not null,
-// 			updated_at datetime null
-// 		);
-// 	`)
-// 	if err != nil {
-// 		return err
-// 	}
+func createStateSchema(db *sqlx.DB) error {
+	_, err := db.Exec(`
+		create table seeds (
+			remote_addr text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);
+	`)
+	if err != nil {
+		return err
+	}
 
-// 	_, err = db.Exec(`
-// 		create table peers (
-// 			stream_id int not null primary key,
-// 			created_at datetime not null,
-// 			updated_at datetime null,
-// 			host_addr text not null
-// 		);
-// 	`)
-// 	if err != nil {
-// 		return err
-// 	}
+	_, err = db.Exec(`
+		create table peers (
+			remote_addr text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);
+	`)
+	if err != nil {
+		return err
+	}
 
-// 	_, err = db.Exec(`
-// 		create table subscriptions (
-// 			id text not null primary key,
-// 			created_at datetime not null,
-// 			updated_at datetime null,
-// 			stream_id int not null primary key,
-// 			host_addr text not null,
-// 			spec text not null,
-// 			foreign key(stream_id) references peers(stream_id)
-// 		);
-// 	`)
-// 	if err != nil {
-// 		return err
-// 	}
+	_, err = db.Exec(`
+		create table subs (
+			remote_addr text not null,
+			spec text not null,
+			created_at datetime not null,
+			updated_at datetime null,
+			primary key(remote_addr, spec),
+			foreign key(remote_addr) references peers(remote_addr)
+		);
+	`)
+	if err != nil {
+		return err
+	}
 
-// 	_, err = db.Exec(`
-// 		create index idx_subscriptions_spec on subscriptions(spec);
-// 	`)
-// 	if err != nil {
-// 		return err
-// 	}
+	_, err = db.Exec(`
+		create index idx_subscriptions_spec on subscriptions(spec);
+	`)
+	if err != nil {
+		return err
+	}
 
-// 	return nil
-// }
+	return nil
+}
 
-// func (s *internalStateStore) UpsertHub(h peer.HubSpec) error {
-// 	_, err := s.db.NamedExec(`
-// 		insert into hubs (
-// 		host_addr,
-// 		created_at,
-// 		updated_at)
-// 		values(
-// 		:host_addr,
-// 		:created_at,
-// 		:updated_at)
-// 		on conflict(host_addr) do update set updated_at = :updated_at
-// 	`, h)
+func (s *internalStateStore) initSeeds(seeds []string) error {
+	ctx, cancelFn := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFn()
 
-// 	return err
-// }
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("saving seeds (begin): %w", err)
+	}
 
-// func (s *internalStateStore) GetHubs() ([]*peer.HubSpec, error) {
-// 	hubs := make([]*peer.HubSpec, 0)
+	_, err = tx.Exec("delete from seeds")
+	if err != nil {
+		err2 := tx.Rollback()
+		if err2 != nil {
+			return fmt.Errorf("saving seeds (rollback): %w", err)
+		}
+		return fmt.Errorf("saving seeds (delete): %w", err)
+	}
 
-// 	err := s.db.Select(&hubs, "select * from hubs")
-// 	if err != nil {
-// 		return nil, err
-// 	}
+	for _, s := range seeds {
+		_, err = tx.Exec("insert into seeds(remote_addr, created_at) values(?, ?)", s, time.Now().UTC())
+		if err != nil {
+			err2 := tx.Rollback()
+			if err2 != nil {
+				return fmt.Errorf("saving seeds (rollback): %w", err)
+			}
+			return fmt.Errorf("saving seeds (insert): %w", err)
+		}
+	}
 
-// 	return hubs, nil
-// }
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("saving seeds (commit): %w", err)
+	}
 
-// func (s *internalStateStore) UpsertPeer(p peer.PeerSpec) error {
-// 	_, err := s.db.NamedExec(`
-// 		insert into peers (
-// 		stream_id,
-// 		created_at,
-// 		updated_at,
-// 		host_addr)
-// 		values(
-// 		:stream_id,
-// 		:created_at,
-// 		:updated_at,
-// 		:host_addr)
-// 		on conflict(stream_id) do update set updated_at = :updated_at
-// 	`, p)
+	return nil
+}
 
-// 	return err
-// }
+func (s *internalStateStore) GetPeers() ([]*model.PeerSpec, error) {
+	rows, err := s.db.Queryx(`select * from peers`)
+	if err != nil {
+		return nil, fmt.Errorf("querying subs: %w", err)
+	}
+	defer rows.Close()
 
-// func (s *internalStateStore) UpsertSubscription(sub peer.SubscriptionSpec) error {
-// 	_, err := s.db.NamedExec(`
-// 		insert into subscriptions (
-// 		id,
-// 		created_at,
-// 		updated_at,
-// 		stream_id,
-// 		host_addr,
-// 		spec)
-// 		values(
-// 		:id,
-// 		:created_at,
-// 		:updated_at,
-// 		:stream_id,
-// 		:host_addr,
-// 		:spec)
-// 		on conflict(stream_id) do update set updated_at = :updated_at
-// 	`, sub)
+	peers := make([]*model.PeerSpec, 0)
+	for rows.Next() {
+		s := &model.PeerSpec{}
+		err = rows.StructScan(s)
+		if err != nil {
+			return nil, fmt.Errorf("scanning peer: %w", err)
+		}
+		peers = append(peers, s)
+	}
 
-// 	return err
-// }
+	return peers, nil
+}
 
-// func (s *internalStateStore) FindPeersBySubscription(sub string) ([]*peer.PeerSpec, error) {
-// 	rows, err := s.db.Queryx(`
-// 		select p.*
-// 		from subscriptions s
-// 		inner join peers p
-// 		on s.stream_id = p.stream_id
-// 		where s.spec = ?`, sub)
+func (s *internalStateStore) GetSubs() ([]*model.SubscriptionSpec, error) {
+	rows, err := s.db.Queryx(`select * from subs`)
+	if err != nil {
+		return nil, fmt.Errorf("querying subs: %w", err)
+	}
+	defer rows.Close()
 
-// 	if err != nil {
-// 		return nil, fmt.Errorf("querying subs: %w", err)
-// 	}
-// 	defer rows.Close()
+	subs := make([]*model.SubscriptionSpec, 0)
+	for rows.Next() {
+		s := &model.SubscriptionSpec{}
+		err = rows.StructScan(s)
+		if err != nil {
+			return nil, fmt.Errorf("scanning subs: %w", err)
+		}
+		subs = append(subs, s)
+	}
 
-// 	peers := make([]*peer.PeerSpec, 0)
-// 	for rows.Next() {
-// 		s := &peer.PeerSpec{}
-// 		err = rows.StructScan(s)
-// 		if err != nil {
-// 			return nil, fmt.Errorf("scanning peer: %w", err)
-// 		}
-// 		peers = append(peers, s)
-// 	}
+	return subs, nil
+}
 
-// 	return peers, nil
-// }
+func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error {
+	ctx, cancelFn := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFn()
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("saving seeds (begin): %w", err)
+	}
+
+	now := time.Now().UTC()
+	for _, s := range subs {
+		_, err = tx.Exec(`
+			insert into peers(remote_addr, created_at)
+			values(?, ?)
+			on conflict(remote_addr) do update set updated_at = ?`,
+			remoteAddr, now, now)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("updating subs (insert peer): %w", err)
+		}
+
+		_, err = tx.Exec(`insert into subs(
+			remote_addr,
+			spec,
+			created_at)
+			values (?, ?, ?)
+			on conflict(remote_addr, spec) do update set updated_at = ?
+			`, remoteAddr, s, now, now)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("updating subs (insert sub): %w", err)
+		}
+	}
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("updating subs(commit): %w", err)
+	}
+
+	return nil
+}
+
+func (s *internalStateStore) FindPeersBySub(sub string) ([]*model.PeerSpec, error) {
+	rows, err := s.db.Queryx(`
+		select p.*
+		from subs s
+		inner join peers p
+		on s.remote_addr = p.remote_addr
+		where s.spec = ?`, sub)
+
+	if err != nil {
+		return nil, fmt.Errorf("querying subs: %w", err)
+	}
+	defer rows.Close()
+
+	peers := make([]*model.PeerSpec, 0)
+	for rows.Next() {
+		s := &model.PeerSpec{}
+		err = rows.StructScan(s)
+		if err != nil {
+			return nil, fmt.Errorf("scanning peer: %w", err)
+		}
+		peers = append(peers, s)
+	}
+
+	return peers, nil
+}
