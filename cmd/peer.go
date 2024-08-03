@@ -17,7 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 
@@ -35,12 +34,13 @@ var peerCmd = &cobra.Command{
 		c := Config{}
 		viper.Unmarshal(&c)
 
-		stateStore, err := datastore.NewInternalState(c.Peers)
+		stateStore, err := datastore.NewInternalState(c.Seeds, c.Subs)
 		if err != nil {
-			return
+			slog.Error("store init", "error", err)
+			panic("unable to init state store")
 		}
 
-		h, err := peer.New(c.Host, c.Port, stateStore)
+		h, err := peer.New(c.Host, c.Port, stateStore, logger)
 		if err != nil {
 			slog.Error("creating peer", "error", err)
 			return
@@ -52,7 +52,8 @@ var peerCmd = &cobra.Command{
 			defer wg.Done()
 			err := h.Run()
 			if err != nil {
-				fmt.Println(err)
+				slog.Error("starting peer", "error", err)
+				panic("unable to start peer")
 			}
 		}()
 		wg.Wait()
@@ -61,7 +62,12 @@ var peerCmd = &cobra.Command{
 
 func init() {
 	peerCmd.Flags().Int("port", 9090, "Peer listen port")
+	peerCmd.Flags().StringArray("seed", []string{}, "host:port spec for seed")
+	peerCmd.Flags().StringArray("sub", []string{}, "initial subscription")
+
 	viper.BindPFlag("port", peerCmd.Flags().Lookup("port"))
+	viper.BindPFlag("seed", peerCmd.Flags().Lookup("seed"))
+	viper.BindPFlag("sub", peerCmd.Flags().Lookup("sub"))
 
 	baseCmd.AddCommand(peerCmd)
 }

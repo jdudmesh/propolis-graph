@@ -16,8 +16,18 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package main
 
-import "github.com/jdudmesh/propolis/cmd"
+import (
+	"log/slog"
+	"os"
+
+	"github.com/jdudmesh/propolis/cmd"
+)
 
 func main() {
-	cmd.Execute()
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
+
+	cmd.Execute(logger)
 }

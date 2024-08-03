@@ -5,15 +5,15 @@ import (
 )
 
 type HubSpec struct {
-	CreatedAt time.Time `db:"created_at"`
-	UpdatedAt time.Time `db:"updated_at"`
-	HostAddr  string    `db:"host_addr"`
+	CreatedAt time.Time  `db:"created_at"`
+	UpdatedAt *time.Time `db:"updated_at"`
+	HostAddr  string     `db:"host_addr"`
 }
 
 type PeerSpec struct {
-	RemoteAddr string    `db:"remote_addr"`
-	CreatedAt  time.Time `db:"created_at"`
-	UpdatedAt  time.Time `db:"updated_at"`
+	RemoteAddr string     `db:"remote_addr"`
+	CreatedAt  time.Time  `db:"created_at"`
+	UpdatedAt  *time.Time `db:"updated_at"`
 }
 
 type SubscriptionSpec struct {

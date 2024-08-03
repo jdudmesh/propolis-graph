@@ -10,11 +10,13 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+const defaultTimeout = 10 * time.Second
+
 type internalStateStore struct {
 	db *sqlx.DB
 }
 
-func NewInternalState(seeds []string) (*internalStateStore, error) {
+func NewInternalState(seeds, subs []string) (*internalStateStore, error) {
 	db, err := sqlx.Connect("sqlite3", "file::memory:?cache=shared")
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
@@ -29,6 +31,16 @@ func NewInternalState(seeds []string) (*internalStateStore, error) {
 		db,
 	}
 
+	err = store.initSeeds(seeds)
+	if err != nil {
+		return nil, fmt.Errorf("creating store: %w", err)
+	}
+
+	err = store.initSubs(subs)
+	if err != nil {
+		return nil, fmt.Errorf("creating store: %w", err)
+	}
+
 	return store, nil
 
 }
@@ -37,6 +49,17 @@ func createStateSchema(db *sqlx.DB) error {
 	_, err := db.Exec(`
 		create table seeds (
 			remote_addr text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`
+		create table local_subs (
+			spec text not null primary key,
 			created_at datetime not null,
 			updated_at datetime null
 		);
@@ -70,9 +93,12 @@ func createStateSchema(db *sqlx.DB) error {
 		return err
 	}
 
-	_, err = db.Exec(`
-		create index idx_subscriptions_spec on subscriptions(spec);
-	`)
+	_, err = db.Exec(`create index idx_subs_peerspec on subs(remote_addr, spec);`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`create index idx_subs_spec on subs(spec);`)
 	if err != nil {
 		return err
 	}
@@ -81,7 +107,7 @@ func createStateSchema(db *sqlx.DB) error {
 }
 
 func (s *internalStateStore) initSeeds(seeds []string) error {
-	ctx, cancelFn := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
 	tx, err := s.db.BeginTxx(ctx, nil)
@@ -117,10 +143,52 @@ func (s *internalStateStore) initSeeds(seeds []string) error {
 	return nil
 }
 
-func (s *internalStateStore) GetPeers() ([]*model.PeerSpec, error) {
-	rows, err := s.db.Queryx(`select * from peers`)
+func (s *internalStateStore) initSubs(subs []string) error {
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancelFn()
+
+	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("querying subs: %w", err)
+		return fmt.Errorf("saving subs (begin): %w", err)
+	}
+
+	_, err = tx.Exec("delete from local_subs")
+	if err != nil {
+		err2 := tx.Rollback()
+		if err2 != nil {
+			return fmt.Errorf("saving local_subs (rollback): %w", err)
+		}
+		return fmt.Errorf("saving local_subs (delete): %w", err)
+	}
+
+	now := time.Now().UTC()
+	for _, sub := range subs {
+		_, err := tx.Exec(`insert into local_subs(spec, created_at)
+			values (?, ?)
+			on conflict(spec) do update set updated_at = ?
+			`, sub, now, now)
+
+		if err != nil {
+			err2 := tx.Rollback()
+			if err2 != nil {
+				return fmt.Errorf("saving local_subs (rollback): %w", err)
+			}
+			return fmt.Errorf("saving local_subs (insert): %w", err)
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("saving local_subs (commit): %w", err)
+	}
+
+	return nil
+}
+
+func (s *internalStateStore) GetSeeds() ([]*model.PeerSpec, error) {
+	rows, err := s.db.Queryx(`select * from seeds`)
+	if err != nil {
+		return nil, fmt.Errorf("querying seeds: %w", err)
 	}
 	defer rows.Close()
 
@@ -137,8 +205,108 @@ func (s *internalStateStore) GetPeers() ([]*model.PeerSpec, error) {
 	return peers, nil
 }
 
-func (s *internalStateStore) GetSubs() ([]*model.SubscriptionSpec, error) {
-	rows, err := s.db.Queryx(`select * from subs`)
+func (s *internalStateStore) GetPeers() ([]*model.PeerSpec, error) {
+	rows, err := s.db.Queryx(`select * from peers`)
+	if err != nil {
+		return nil, fmt.Errorf("querying peers: %w", err)
+	}
+	defer rows.Close()
+
+	peers := make([]*model.PeerSpec, 0)
+	for rows.Next() {
+		s := &model.PeerSpec{}
+		err = rows.StructScan(s)
+		if err != nil {
+			return nil, fmt.Errorf("scanning peer: %w", err)
+		}
+		peers = append(peers, s)
+	}
+
+	return peers, nil
+}
+
+func (s *internalStateStore) UpsertPeersForSub(sub string, peers []string) error {
+	existing, err := s.FindPeersBySub(sub)
+	if err != nil {
+		return fmt.Errorf("upsert peers/subs (finding existing): %w", err)
+	}
+
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancelFn()
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("upsert peers/subs (begin): %w", err)
+	}
+
+	current := map[string]struct{}{}
+	now := time.Now().UTC()
+	for _, p := range peers {
+		current[p] = struct{}{}
+
+		_, err = tx.Exec(`
+			insert into peers(remote_addr, created_at)
+			values(?, ?)
+			on conflict(remote_addr) do update set updated_at = ?`,
+			p, now, now)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("upsert peers/subs (insert peer): %w", err)
+		}
+
+		_, err = tx.Exec(`insert into subs(
+			remote_addr,
+			spec,
+			created_at)
+			values (?, ?, ?)
+			on conflict(remote_addr, spec) do update set updated_at = ?
+			`, p, sub, now, now)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("upsert peers/subs (insert sub): %w", err)
+		}
+	}
+
+	for _, e := range existing {
+		if _, ok := current[e.RemoteAddr]; !ok {
+			_, err = tx.NamedExec(`delete from subs where remote_addr = :remote_addr and spec = :spec`, e)
+			if err != nil {
+				tx.Rollback()
+				return fmt.Errorf("upsert peers/subs (delete old subs): %w", err)
+			}
+		}
+	}
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("upsert peers/subs (commit): %w", err)
+	}
+
+	return nil
+}
+
+func (s *internalStateStore) GetSelfSubs() ([]*model.SubscriptionSpec, error) {
+	rows, err := s.db.Queryx(`select * from local_subs`)
+	if err != nil {
+		return nil, fmt.Errorf("querying subs: %w", err)
+	}
+	defer rows.Close()
+
+	subs := make([]*model.SubscriptionSpec, 0)
+	for rows.Next() {
+		s := &model.SubscriptionSpec{}
+		err = rows.StructScan(s)
+		if err != nil {
+			return nil, fmt.Errorf("scanning subs: %w", err)
+		}
+		subs = append(subs, s)
+	}
+
+	return subs, nil
+}
+
+func (s *internalStateStore) FindSubsByRemoteAddr(remoteAddr string) ([]*model.SubscriptionSpec, error) {
+	rows, err := s.db.Queryx(`select * from subs where remote_addr = ?`, remoteAddr)
+
 	if err != nil {
 		return nil, fmt.Errorf("querying subs: %w", err)
 	}
@@ -158,16 +326,24 @@ func (s *internalStateStore) GetSubs() ([]*model.SubscriptionSpec, error) {
 }
 
 func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error {
-	ctx, cancelFn := context.WithTimeout(context.Background(), time.Second)
+	existing, err := s.FindSubsByRemoteAddr(remoteAddr)
+	if err != nil {
+		return fmt.Errorf("upsert subs (finding existing): %w", err)
+	}
+
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("saving seeds (begin): %w", err)
+		return fmt.Errorf("upsert subs (begin): %w", err)
 	}
 
+	current := map[string]struct{}{}
 	now := time.Now().UTC()
 	for _, s := range subs {
+		current[s] = struct{}{}
+
 		_, err = tx.Exec(`
 			insert into peers(remote_addr, created_at)
 			values(?, ?)
@@ -175,7 +351,7 @@ func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error 
 			remoteAddr, now, now)
 		if err != nil {
 			tx.Rollback()
-			return fmt.Errorf("updating subs (insert peer): %w", err)
+			return fmt.Errorf("upsert subs (insert peer): %w", err)
 		}
 
 		_, err = tx.Exec(`insert into subs(
@@ -187,12 +363,22 @@ func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error 
 			`, remoteAddr, s, now, now)
 		if err != nil {
 			tx.Rollback()
-			return fmt.Errorf("updating subs (insert sub): %w", err)
+			return fmt.Errorf("upsert subs (insert sub): %w", err)
+		}
+	}
+
+	for _, e := range existing {
+		if _, ok := current[e.Spec]; !ok {
+			_, err = tx.NamedExec(`delete from subs where remote_addr = :remote_addr and spec = :spec`, e)
+			if err != nil {
+				tx.Rollback()
+				return fmt.Errorf("upsert subs (delete old subs): %w", err)
+			}
 		}
 	}
 	err = tx.Commit()
 	if err != nil {
-		return fmt.Errorf("updating subs(commit): %w", err)
+		return fmt.Errorf("upsert subs(commit): %w", err)
 	}
 
 	return nil

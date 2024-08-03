@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -25,6 +26,7 @@ import (
 )
 
 var cfgFile string
+var logger *slog.Logger
 
 // baseCmd represents the base command when called without any subcommands
 var baseCmd = &cobra.Command{
@@ -38,7 +40,8 @@ var baseCmd = &cobra.Command{
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
-func Execute() {
+func Execute(l *slog.Logger) {
+	logger = l // TODO: yuk, don't do this
 	err := baseCmd.Execute()
 	if err != nil {
 		os.Exit(1)
@@ -84,5 +87,6 @@ func initConfig() {
 type Config struct {
 	Host  string
 	Port  int
-	Peers []string
+	Seeds []string `mapstructure:"seed"`
+	Subs  []string `mapstructure:"sub"`
 }

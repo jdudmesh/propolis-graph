@@ -23,24 +23,30 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
+const remoteAddressHeader = "x-propolis-remote-address"
+
 type peerStore interface {
+	GetSeeds() ([]*model.PeerSpec, error)
 	GetPeers() ([]*model.PeerSpec, error)
-	GetSubs() ([]*model.SubscriptionSpec, error)
+	UpsertPeersForSub(sub string, peers []string) error
+	GetSelfSubs() ([]*model.SubscriptionSpec, error)
 	UpsertSubs(remoteAddr string, subs []string) error
 	FindPeersBySub(sub string) ([]*model.PeerSpec, error)
 }
 
 type peer struct {
-	nodeID string
-	host   string
-	port   int
-	store  peerStore
-	server *http3.Server
-	client *http.Client
-	quit   chan struct{}
+	nodeID     string
+	host       string
+	port       int
+	store      peerStore
+	logger     *slog.Logger
+	server     *http3.Server
+	client     *http.Client
+	quit       chan struct{}
+	remoteAddr string
 }
 
-func New(host string, port int, store peerStore) (*peer, error) {
+func New(host string, port int, store peerStore, logger *slog.Logger) (*peer, error) {
 	nodeID, err := gonanoid.New()
 	if err != nil {
 		return nil, fmt.Errorf("generating node id: %w", err)
@@ -51,6 +57,7 @@ func New(host string, port int, store peerStore) (*peer, error) {
 		host:   host,
 		port:   port,
 		store:  store,
+		logger: logger,
 		quit:   make(chan struct{}),
 	}
 
@@ -75,7 +82,7 @@ func (p *peer) Run() error {
 	defer p.server.CloseGracefully(10 * time.Second)
 
 	addr := &net.UDPAddr{IP: net.ParseIP(p.host), Port: p.port}
-	slog.Info("starting listener", "addr", addr)
+	p.logger.Info("starting listener", "addr", addr)
 
 	udpConn, err := net.ListenUDP("udp", addr)
 	if err != nil {
@@ -94,7 +101,7 @@ func (p *peer) Run() error {
 		},
 		QUICConfig: &quic.Config{}, // QUIC connection options
 		Dial: func(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config) (quic.EarlyConnection, error) {
-			slog.Debug("dialing", "addr", addr)
+			p.logger.Debug("dialing", "addr", addr)
 			a, err := net.ResolveUDPAddr("udp", addr)
 			if err != nil {
 				return nil, err
@@ -116,11 +123,11 @@ func (p *peer) Run() error {
 	go func() {
 		err := p.server.ServeListener(listener)
 		if err != nil {
-			slog.Error("closing peer server", "error", err)
+			p.logger.Error("closing peer server", "error", err)
 		}
 	}()
 
-	err = p.refreshSubscriptions()
+	err = p.getInitialPeers()
 	if err != nil {
 		return fmt.Errorf("refreshing subscriptions: %w", err)
 	}
@@ -131,9 +138,9 @@ func (p *peer) Run() error {
 	for {
 		select {
 		case <-t.C:
-			err := p.refreshSubscriptions()
+			err := p.refreshSubs()
 			if err != nil {
-				slog.Error("refreshing subscriptions", "error", err)
+				p.logger.Error("refreshing subscriptions", "error", err)
 			}
 			roundTripper.CloseIdleConnections()
 		case <-p.quit:
@@ -160,6 +167,7 @@ func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request
 		return
 	}
 
+	p.logger.Debug("upsert sub for peer", "sub", params.Spec, "peer", req.RemoteAddr)
 	err = p.store.UpsertSubs(req.RemoteAddr, params.Spec)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -188,8 +196,9 @@ func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	w.Write(data)
+	w.Header().Add(remoteAddressHeader, req.RemoteAddr)
 	w.WriteHeader(http.StatusCreated)
+	w.Write(data)
 }
 
 func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
@@ -199,7 +208,7 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 }
 
 func (p *peer) handlePing(w http.ResponseWriter, req *http.Request) {
-	slog.Info("ping", "remote", req.RemoteAddr)
+	p.logger.Info("ping", "remote", req.RemoteAddr)
 
 	resp := model.PingResponse{
 		Address: req.RemoteAddr,
@@ -219,16 +228,16 @@ func (p *peer) handlePing(w http.ResponseWriter, req *http.Request) {
 func (p *peer) sendPong(addr string) {
 	resp, err := p.client.Post(fmt.Sprintf("https://%s/pong", addr), model.ContentTypeJSON, nil)
 	if err != nil {
-		slog.Error("sending pong", "error", err, "remote", addr)
+		p.logger.Error("sending pong", "error", err, "remote", addr)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Error("bad pong response", "remote", addr)
+		p.logger.Error("bad pong response", "remote", addr)
 	}
 }
 
 func (p *peer) handlePong(w http.ResponseWriter, req *http.Request) {
-	slog.Info("pong", "remote", req.RemoteAddr)
+	p.logger.Info("pong", "remote", req.RemoteAddr)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -240,37 +249,39 @@ func (p *peer) pingPeers() error {
 	for _, peer := range peers {
 		resp, err := p.client.Post(fmt.Sprintf("https://%s/ping", peer), model.ContentTypeJSON, nil)
 		if err != nil {
-			slog.Error("sending ping", "error", err, "remote", peer)
+			p.logger.Error("sending ping", "error", err, "remote", peer)
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			slog.Error("bad pong response", "remote", peer)
+			p.logger.Error("bad pong response", "remote", peer)
 		}
 	}
 
 	return nil
 }
 
-func (p *peer) refreshSubscriptions() error {
-	peers, err := p.store.GetPeers()
+func (p *peer) getInitialPeers() error {
+	seeds, err := p.store.GetSeeds()
 	if err != nil {
 		return fmt.Errorf("fetching peers: %w", err)
 	}
 
-	subs, err := p.store.GetSubs()
+	subs, err := p.store.GetSelfSubs()
 	if err != nil {
-		return fmt.Errorf("fetching subs: %w", err)
+		return fmt.Errorf("fetching peers: %w", err)
 	}
 	specs := make([]string, len(subs))
 	for i, s := range subs {
 		specs[i] = s.Spec
 	}
 
-	for _, peer := range peers {
+	p.logger.Info("fetching peers", "seeds", len(seeds), "subs", len(subs))
+
+	for _, peer := range seeds {
 		err = p.sendSub(peer.RemoteAddr, specs)
 		if err != nil {
-			slog.Error("refreshing sub", "error", err, "peer", peer, "subs", subs)
+			p.logger.Error("fetching peers", "error", err, "peer", peer, "subs", subs)
 			continue
 		}
 	}
@@ -278,7 +289,14 @@ func (p *peer) refreshSubscriptions() error {
 	return nil
 }
 
+func (p *peer) refreshSubs() error {
+	p.logger.Debug("refreshing subs")
+	return nil
+}
+
 func (p *peer) sendSub(peer string, subs []string) error {
+	p.logger.Debug("sending sub", "peer", peer, "subs", subs)
+
 	params := model.SubscriptionRequest{
 		Spec: subs,
 	}
@@ -295,7 +313,39 @@ func (p *peer) sendSub(peer string, subs []string) error {
 	}
 
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("failed to create subscription")
+		return fmt.Errorf("create subscription resp code: %d", resp.StatusCode)
+	}
+
+	p.remoteAddr = resp.Header.Get(remoteAddressHeader)
+
+	respData := model.SubscriptionResponse{}
+	body := resp.Body
+	defer body.Close()
+
+	dec := json.NewDecoder(body)
+	err = dec.Decode(&respData)
+	if err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	for sub, peerList := range respData.Peers {
+		// don't include ourselves in the list of peers
+		cleanedList := make([]string, 0, len(respData.Peers))
+		for _, peer := range peerList {
+			if peer == p.remoteAddr {
+				continue
+			}
+			cleanedList = append(cleanedList, peer)
+		}
+		if len(cleanedList) == 0 {
+			continue
+		}
+
+		p.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
+		err := p.store.UpsertPeersForSub(sub, cleanedList)
+		if err != nil {
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
 	}
 
 	return nil
