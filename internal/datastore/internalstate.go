@@ -31,7 +31,7 @@ func NewInternalState(seeds, subs []string) (*internalStateStore, error) {
 		db,
 	}
 
-	err = store.initSeeds(seeds)
+	err = store.UpsertSeeds(seeds)
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
@@ -103,10 +103,42 @@ func createStateSchema(db *sqlx.DB) error {
 		return err
 	}
 
+	_, err = db.Exec(`
+		create table actions (
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			action text not null,
+			remote_addr text not null
+		);
+	`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`create index idx_actions_peer on actions(remote_addr);`)
+	if err != nil {
+		return err
+	}
+
+	_, err = db.Exec(`
+		create table pending_subs (
+			remote_addr text not null,
+			spec text not null,
+			created_at datetime not null,
+			updated_at datetime null,
+			primary key(remote_addr, spec),
+			foreign key(remote_addr) references peers(remote_addr)
+		);
+	`)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func (s *internalStateStore) initSeeds(seeds []string) error {
+func (s *internalStateStore) UpsertSeeds(seeds []string) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -408,4 +440,69 @@ func (s *internalStateStore) FindPeersBySub(sub string) ([]*model.PeerSpec, erro
 	}
 
 	return peers, nil
+}
+
+func (s *internalStateStore) AddAction(id, action, remoteAddr string) error {
+	_, err := s.db.Exec(`
+		insert into actions (id, created_at, action, remote_addr)
+		values(?, ?, ?, ?)
+	`, id, time.Now().UTC(), action, remoteAddr)
+	return err
+}
+
+func (s *internalStateStore) AddPendingPeer(remoteAddr string, sub string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`insert into pending_subs(
+		remote_addr,
+		spec,
+		created_at)
+		values (?, ?, ?)
+		on conflict(remote_addr, spec) do update set updated_at = ?
+		`, remoteAddr, sub, now, now)
+	if err != nil {
+		return fmt.Errorf("add pending_subs (insert sub): %w", err)
+	}
+
+	return nil
+}
+
+func (s *internalStateStore) RemovePendingPeer(remoteAddr string, sub string) error {
+	_, err := s.db.Exec(`delete from pending_subs where remote_addr = ? and spec = ?`, remoteAddr, sub)
+	if err != nil {
+		return fmt.Errorf("delete pending_subs: %w", err)
+	}
+	return nil
+}
+
+func (s *internalStateStore) GetPendingPeersForSub(sub string) ([]*model.SubscriptionSpec, error) {
+	rows, err := s.db.Queryx(`
+		select *
+		from pending_subs
+		where spec = ?`, sub)
+
+	if err != nil {
+		return nil, fmt.Errorf("querying pending subs: %w", err)
+	}
+	defer rows.Close()
+
+	peers := make([]*model.SubscriptionSpec, 0)
+	for rows.Next() {
+		res := &model.SubscriptionSpec{}
+		err = rows.StructScan(res)
+		if err != nil {
+			return nil, fmt.Errorf("scanning peer: %w", err)
+		}
+		peers = append(peers, res)
+	}
+
+	return peers, nil
+}
+
+func (s *internalStateStore) TouchPeer(remoteAddr string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`update peers set updated_at = ? where remote_addr = ?`, now, remoteAddr)
+	if err != nil {
+		return fmt.Errorf("touch peer: %w", err)
+	}
+	return nil
 }

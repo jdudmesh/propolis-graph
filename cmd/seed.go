@@ -18,18 +18,16 @@ package cmd
 
 import (
 	"sync"
-	"time"
 
 	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-var peerCmd = &cobra.Command{
-	Use:   "peer",
-	Short: "Propolis peer",
-	Long:  `Run propolis in peer mode`,
+var seedCmd = &cobra.Command{
+	Use:   "seed",
+	Short: "Propolis Seed",
+	Long:  `Run propolis in seed mode`,
 	Run: func(cmd *cobra.Command, args []string) {
 		host, err := cmd.Flags().GetString("host")
 		if err != nil {
@@ -46,18 +44,13 @@ var peerCmd = &cobra.Command{
 			panic(err)
 		}
 
-		subs, err := cmd.Flags().GetStringArray("sub")
-		if err != nil {
-			panic(err)
-		}
-
-		stateStore, err := datastore.NewInternalState(seeds, subs)
+		stateStore, err := datastore.NewInternalState(seeds, []string{})
 		if err != nil {
 			logger.Error("store init", "error", err)
 			panic("unable to init state store")
 		}
 
-		h, err := node.NewPeer(host, port, stateStore, logger)
+		h, err := node.NewSeed(host, port, stateStore, logger)
 		if err != nil {
 			logger.Error("creating peer", "error", err)
 			return
@@ -73,26 +66,10 @@ var peerCmd = &cobra.Command{
 				panic("unable to start peer")
 			}
 		}()
-
-		// just testing
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			action := time.Now().Format(time.RFC3339)
-			logger.Info("sending action", "action", action)
-			err := h.SendAction(action)
-			if err != nil {
-				logger.Error("sending action", "error", err)
-			}
-		}
-
 		wg.Wait()
 	},
 }
 
 func init() {
-	peerCmd.Flags().StringArray("sub", []string{}, "initial subscription")
-	viper.BindPFlag("sub", peerCmd.Flags().Lookup("sub"))
-
-	baseCmd.AddCommand(peerCmd)
+	baseCmd.AddCommand(seedCmd)
 }

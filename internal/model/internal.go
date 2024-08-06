@@ -1,8 +1,11 @@
 package model
 
 import (
+	"errors"
 	"time"
 )
+
+var ErrAlreadyExists = errors.New("entity already exists")
 
 type HubSpec struct {
 	CreatedAt time.Time  `db:"created_at"`

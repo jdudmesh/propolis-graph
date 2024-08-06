@@ -1,7 +1,7 @@
 package model
 
 type PingResponse struct {
-	Address string `json:"addr"`
+	Seeds []string `json:"seeds"`
 }
 
 type SubscriptionRequest struct {
@@ -10,4 +10,8 @@ type SubscriptionRequest struct {
 
 type SubscriptionResponse struct {
 	Peers map[string][]string `json:"peers"`
+}
+
+type Action struct {
+	Action string
 }

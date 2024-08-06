@@ -49,18 +49,17 @@ func Execute(l *slog.Logger) {
 }
 
 func init() {
-	cobra.OnInitialize(initConfig)
-
-	// Here you will define your flags and configuration settings.
-	// Cobra supports persistent flags, which, if defined here,
-	// will be global for your application.
 
 	baseCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./propolis.yaml)")
+	baseCmd.PersistentFlags().String("host", "0.0.0.0", "Peer listen address")
+	baseCmd.PersistentFlags().Int("port", 9090, "Peer listen port")
+	baseCmd.PersistentFlags().StringArray("seed", []string{}, "host:port spec for seed")
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	baseCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	viper.BindPFlag("host", baseCmd.Flags().Lookup("host"))
+	viper.BindPFlag("port", baseCmd.Flags().Lookup("port"))
+	viper.BindPFlag("seed", baseCmd.Flags().Lookup("seed"))
 
+	cobra.OnInitialize(initConfig)
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -82,11 +81,4 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Fprintln(os.Stderr, "Using config file:", viper.ConfigFileUsed())
 	}
-}
-
-type Config struct {
-	Host  string
-	Port  int
-	Seeds []string `mapstructure:"seed"`
-	Subs  []string `mapstructure:"sub"`
 }
