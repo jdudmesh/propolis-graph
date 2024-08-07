@@ -55,6 +55,7 @@ type peerStore interface {
 	GetPendingPeersForSub(sub string) ([]*model.SubscriptionSpec, error)
 	GetSelfSubs() ([]*model.SubscriptionSpec, error)
 	UpsertSubs(remoteAddr string, subs []string) error
+	DeleteSubs(remoteAddr string, subs []string) error
 	FindPeersBySub(sub string) ([]*model.PeerSpec, error)
 	AddAction(id, action, remoteAddr string) error
 }
@@ -110,7 +111,7 @@ func (p *peer) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /subscription", p.handleCreateSubscription)
 	mux.HandleFunc("DELETE /subscription", p.handleDeleteSubscription)
-	mux.HandleFunc("POST /subscription/{id}/peer", p.handleSubscriptionPeerUpdate)
+	mux.HandleFunc("POST /subscription/peer", p.handleSubscriptionPeerUpdate)
 	mux.HandleFunc("POST /action", p.handleCreateAction)
 	mux.HandleFunc("POST /ping", p.handlePing)
 	mux.HandleFunc("POST /pong", p.handlePong)
@@ -343,7 +344,7 @@ func (p *peer) doNotifyPendingPeers(sub string) error {
 			ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelFn()
 
-			url := fmt.Sprintf("https://%s/subscription/%s/peer", pp.RemoteAddr, sub)
+			url := fmt.Sprintf("https://%s/subscription/peer", pp.RemoteAddr)
 			rdr := bytes.NewBuffer(data)
 			req, err := http.NewRequestWithContext(ctx, "POST", url, rdr)
 			if err != nil {
@@ -377,7 +378,25 @@ func (p *peer) doNotifyPendingPeers(sub string) error {
 }
 
 func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
-	w.WriteHeader(http.StatusOK)
+	params := model.SubscriptionRequest{}
+
+	body := req.Body
+	defer body.Close()
+
+	dec := json.NewDecoder(body)
+	err := dec.Decode(&params)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = p.store.DeleteSubs(req.RemoteAddr, params.Spec)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (p *peer) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Request) {

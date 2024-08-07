@@ -416,6 +416,31 @@ func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error 
 	return nil
 }
 
+func (s *internalStateStore) DeleteSubs(remoteAddr string, subs []string) error {
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancelFn()
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete subs (begin): %w", err)
+	}
+
+	for _, s := range subs {
+		_, err := tx.Exec(`delete from subs where remote_addr = ? and spec = ?`, remoteAddr, s)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("delete subs (delete old subs): %w", err)
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("delete subs(commit): %w", err)
+	}
+
+	return nil
+}
+
 func (s *internalStateStore) FindPeersBySub(sub string) ([]*model.PeerSpec, error) {
 	rows, err := s.db.Queryx(`
 		select p.*

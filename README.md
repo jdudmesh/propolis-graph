@@ -1,16 +1,9 @@
-Peer to peer social network base on distributed peer-to-peer graph database with content stored on IPFS
+# Overview
 
-GDB is based on [Cypher](https://s3.amazonaws.com/artifacts.opencypher.org/openCypher9.pdf)
+Propolis is a radically open and decentralised peer to peer social network. It is fully open source and cannot be owned or controlled by any single entity or group.
 
-There are nodes for Users, Posts, Root servers. Relationships for Likes, Blocks
+It is based on a directed graph built on top of a peer-to-peer network. Metadata about people and posts is stored on the graph, content can be stored anywhere although IPFS is the preferred platform.
 
-Updates broadcast over P2P similar to Bitorrent. Messages are Cypher queries signed.
+For more details see [the website](https://propolis.social).
 
-`CREATE (n:Person {name: 'Andres', title: 'Developer'})`
-
-Supported actions `CREATE`, `MERGE`, `SET`, `DELETE`.
-
-Can also `SUBSCRIBE` to `MATCH`.
-
-How to track changes?
-* Each node has a hash of previous 50 hashes + current ID
+This project is a labour of love. It is being developed as a personal project without an expectation of generating any revenue. Please consider sponsoring me.
