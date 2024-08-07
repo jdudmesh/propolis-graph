@@ -14,7 +14,12 @@ language spec: https://opencypher.org/ https://s3.amazonaws.com/artifacts.opency
 
 const (
 	alphanumeric = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	numeric      = "0123456789"
 	spaces       = " \t\n"
+	braces       = "{}"
+	colon        = ":"
+	quotes       = "\"'"
+	escapeChar   = "\\"
 )
 
 // itemType identifies the type of lex items.
@@ -23,19 +28,31 @@ type itemType int
 const (
 	itemError itemType = iota // error occurred; value is text of error
 	itemEOF
-	itemSpace      // run of spaces separating arguments
-	itemCommand    // e.g. MERGE DELETE etc
-	itemString     // quoted string (includes quotes)
-	itemText       // plain text
-	itemNumber     // simple number
-	itemIdentifier //
-	itemLabel      //
-	itemLeftNode
-	itemRightNode
+	itemSpace          // run of spaces separating arguments
+	itemCommand        // e.g. MERGE DELETE etc
+	itemString         // quoted string (includes quotes)
+	itemText           // plain text
+	itemNumber         // simple number
+	itemNodeIdentifier //
+	itemNodeLabelStart
+	itemNodeLabel //
+	itemStartNode
+	itemEndNode
+	itemRelationDirNeutral
+	itemRelationDirLeft
+	itemRelationDirRight
+	itemRelationStart
+	itemRelationEnd
+	itemRelationIdentifier
+	itemRelationLabelStart
+	itemRelationLabel
 	itemLeftRelation
 	itemRightRelation
 	itemLeftAttribs
 	itemRightAttribs
+	itemAttribSeparator
+	itemAttribIdentifier
+	itemAttribValue
 
 	itemKeyword // keywords follow
 	itemMatch
@@ -161,6 +178,35 @@ func (l *lexer) acceptRun(valid string) {
 	l.backup()
 }
 
+// acceptRun consumes a run of runes from the valid set. the run may be quoted
+func (l *lexer) acceptQuotedRun(valid string) {
+	n := l.peek()
+	if n == '\'' || n == '"' {
+		l.lexQuotedRun()
+		return
+	}
+
+	for strings.ContainsRune(valid, l.next()) {
+	}
+	l.backup()
+}
+
+func (l *lexer) lexQuotedRun() {
+	quoteChar := l.next()
+	isEscapeSeq := false
+	for {
+		n := l.next()
+		switch {
+		case n == quoteChar && !isEscapeSeq:
+			return
+		case n == '\\':
+			isEscapeSeq = true
+		default:
+			isEscapeSeq = false
+		}
+	}
+}
+
 // errorf returns an error token and terminates the scan by passing
 // back a nil pointer that will be the next state, terminating l.nextItem.
 func (l *lexer) errorf(format string, args ...any) stateFn {
@@ -198,63 +244,394 @@ func lexEOF(l *lexer) stateFn {
 }
 
 func lexClause(l *lexer) stateFn {
+	if int(l.pos) >= len(l.input) {
+		return lexEOF
+	}
+
 	l.acceptRun(spaces)
 
 	if l.pos >= len(l.input) {
 		return lexEOF
 	}
 
-	l.acceptRun(alphanumeric)
-
-	i := item{itemKeyword, l.start, l.input[l.start:l.pos]}
-
-	if t, ok := keywords[strings.ToLower(i.val)]; ok {
-		i.typ = t
-		l.emitItem(i)
-		l.acceptRun(spaces)
+	n := l.peek()
+	switch {
+	case strings.ContainsRune(alphanumeric, n):
+		l.acceptRun(alphanumeric)
+		i := l.thisItem(itemKeyword)
+		if t, ok := keywords[strings.ToLower(i.val)]; ok {
+			i.typ = t
+			l.emitItem(i)
+			return lexClause
+		}
+	case n == '(':
 		return lexNodeStart
+	case n == ')':
+		return lexNodeEnd
+	case n == ':':
+		return lexNodeLabelStart
+	case n == '-':
+		return lexRelationDirNeutral
+	case n == '<':
+		return lexRelationDirLeftStart
+	case n == '[':
+		return lexRelationStart
+	case n == ']':
+		return lexRelationEnd
 	}
 
-	l.errorf("unknown clause: %s", l.input[l.start:l.pos])
+	l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
 	return nil
 }
 
 func lexNodeStart(l *lexer) stateFn {
-	if l.pos >= len(l.input) {
-		return lexEOF
-	}
+	l.acceptRun(spaces)
+	l.ignore()
 
 	r := l.next()
 	if r != '(' {
-		l.errorf("expected start of node definitions: %s", l.input[l.start:l.pos])
+		l.errorf("syntax error, expected '(': %s", l.input[l.start:l.pos])
+		return nil
 	}
+
+	i := l.thisItem(itemStartNode)
+	l.emitItem(i)
 
 	return lexNodeInner
 }
 
 func lexNodeInner(l *lexer) stateFn {
 	l.acceptRun(spaces)
+	l.ignore()
+
+	n := l.peek()
+	switch {
+	case strings.ContainsRune(alphanumeric, n):
+		return lexNodeIdentifier
+	case n == ':':
+		return lexNodeLabelStart
+	case n == '{':
+		return lexAttribStart
+	case n == '}':
+		return lexAttribEnd
+	case n == ')':
+		return lexNodeEnd
+	}
 	return nil
+}
+
+func lexNodeIdentifier(l *lexer) stateFn {
+	l.acceptRun(alphanumeric)
+
+	i := l.thisItem(itemNodeIdentifier)
+	l.emitItem(i)
+
+	return lexNodeInner
+}
+
+func lexNodeLabelStart(l *lexer) stateFn {
+	l.next()
+	i := l.thisItem(itemNodeLabelStart)
+	l.emitItem(i)
+	return lexNodeLabel
+}
+
+func lexNodeLabel(l *lexer) stateFn {
+	l.acceptRun(alphanumeric)
+	i := l.thisItem(itemNodeLabel)
+	l.emitItem(i)
+
+	return lexNodeInner
+}
+
+func lexAttribStart(l *lexer) stateFn {
+	r := l.next()
+	if r != '{' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemLeftAttribs)
+	l.emitItem(i)
+	return lexNodeAttrib
+}
+
+func lexAttribEnd(l *lexer) stateFn {
+	r := l.next()
+	if r != '}' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemRightAttribs)
+	l.emitItem(i)
+	return lexNodeInner
+}
+
+func lexNodeAttrib(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	n := l.peek()
+	switch {
+	case strings.ContainsRune(alphanumeric, n):
+		return lexNodeAttribIdentifier
+	case n == ':':
+		return lexNodeAttribSeparator
+	case n == ',':
+		l.next()
+		l.ignore()
+		return lexNodeAttrib
+	case n == '}':
+		return lexAttribEnd
+	}
+
+	return nil
+}
+
+func lexNodeAttribIdentifier(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	l.acceptRun(alphanumeric)
+	i := l.thisItem(itemAttribIdentifier)
+	l.emitItem(i)
+
+	return lexNodeAttribSeparator
+}
+
+func lexNodeAttribSeparator(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	r := l.next()
+	if r != ':' {
+		l.errorf("syntax error: %s", l.input[l.start:l.pos])
+		return nil
+	}
+
+	i := l.thisItem(itemAttribSeparator)
+	l.emitItem(i)
+
+	return lexNodeAttribValue
+}
+
+func lexNodeAttribValue(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	l.acceptQuotedRun(numeric)
+	i := l.thisItem(itemAttribValue)
+	l.emitItem(i)
+
+	return lexNodeAttrib
 }
 
 func lexNodeEnd(l *lexer) stateFn {
-	if l.pos >= len(l.input) {
-		return lexEOF
-	}
+	l.acceptRun(spaces)
+	l.ignore()
 
 	r := l.next()
 	if r != ')' {
-		l.errorf("expected emd of node definitions: %s", l.input[l.start:l.pos])
+		l.errorf("syntax error: %s", l.input[l.start:l.pos])
 	}
 
-	return lexNodeRelationshipStart
+	i := l.thisItem(itemEndNode)
+	l.emitItem(i)
+
+	return lexClause
 }
 
-func lexNodeRelationshipStart(l *lexer) stateFn {
+func lexRelationDirNeutral(l *lexer) stateFn {
 	l.acceptRun(spaces)
-	if l.pos >= len(l.input) {
-		return lexEOF
+	l.ignore()
+
+	r1 := l.next()
+	if r1 != '-' {
+		l.errorf("syntax error: %s", l.input[l.start:l.pos])
+	}
+
+	r2 := l.next()
+	if r2 != '>' {
+		l.backup()
+		i := l.thisItem(itemRelationDirNeutral)
+		l.emitItem(i)
+	} else {
+		i := l.thisItem(itemRelationDirRight)
+		l.emitItem(i)
+	}
+
+	return lexClause
+}
+
+func lexRelationDirLeftStart(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	r1 := l.next()
+	if r1 != '-' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemRelationDirLeft)
+	l.emitItem(i)
+
+	return lexClause
+}
+
+func lexRelationStart(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	r1 := l.next()
+	if r1 != '[' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemRelationStart)
+	l.emitItem(i)
+
+	return lexRelationInner
+}
+
+func lexRelationEnd(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	r1 := l.next()
+	if r1 != ']' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemRelationEnd)
+	l.emitItem(i)
+
+	return lexClause
+}
+
+func lexRelationInner(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	n := l.peek()
+	switch {
+	case strings.ContainsRune(alphanumeric, n):
+		return lexRelationIdentifier
+	case n == ':':
+		return lexRelationLabelStart
+	case n == '{':
+		return lexRelationAttribStart
+	case n == '}':
+		return lexRelationAttribEnd
+	case n == ']':
+		return lexRelationEnd
 	}
 
 	return nil
+}
+
+func lexRelationIdentifier(l *lexer) stateFn {
+	l.acceptRun(alphanumeric)
+
+	i := l.thisItem(itemRelationIdentifier)
+	l.emitItem(i)
+
+	return lexNodeInner
+}
+
+func lexRelationLabelStart(l *lexer) stateFn {
+	r := l.next()
+	if r != ':' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+	i := l.thisItem(itemRelationLabelStart)
+	l.emitItem(i)
+	return lexRelationLabel
+}
+
+func lexRelationLabel(l *lexer) stateFn {
+	l.acceptRun(alphanumeric)
+	i := l.thisItem(itemRelationLabel)
+	l.emitItem(i)
+
+	return lexRelationInner
+}
+
+func lexRelationAttribStart(l *lexer) stateFn {
+	r := l.next()
+	if r != '{' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemLeftAttribs)
+	l.emitItem(i)
+	return lexRelationAttrib
+}
+
+func lexRelationAttribEnd(l *lexer) stateFn {
+	r := l.next()
+	if r != '}' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+	}
+
+	i := l.thisItem(itemRightAttribs)
+	l.emitItem(i)
+	return lexRelationInner
+}
+
+func lexRelationAttrib(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	n := l.peek()
+	switch {
+	case strings.ContainsRune(alphanumeric, n):
+		return lexRelationAttribIdentifier
+	case n == ':':
+		return lexRelationAttribSeparator
+	case n == ',':
+		l.next()
+		l.ignore()
+		return lexRelationAttrib
+	case n == '}':
+		return lexAttribEnd
+	}
+
+	return nil
+}
+
+func lexRelationAttribIdentifier(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	l.acceptRun(alphanumeric)
+	i := l.thisItem(itemAttribIdentifier)
+	l.emitItem(i)
+
+	return lexRelationAttribSeparator
+}
+
+func lexRelationAttribSeparator(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	r := l.next()
+	if r != ':' {
+		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
+		return nil
+	}
+
+	i := l.thisItem(itemAttribSeparator)
+	l.emitItem(i)
+
+	return lexRelationAttribValue
+}
+
+func lexRelationAttribValue(l *lexer) stateFn {
+	l.acceptRun(spaces)
+	l.ignore()
+
+	l.acceptRun(alphanumeric + quotes + escapeChar)
+	i := l.thisItem(itemAttribValue)
+	l.emitItem(i)
+
+	return lexRelationAttrib
 }
