@@ -1,4 +1,4 @@
-package lexer
+package ast
 
 import (
 	"fmt"
@@ -36,7 +36,7 @@ const (
 	itemNodeIdentifier //
 	itemNodeLabelStart
 	itemNodeLabel //
-	itemStartNode
+	itemNodeStart
 	itemEndNode
 	itemRelationDirNeutral
 	itemRelationDirLeft
@@ -48,8 +48,8 @@ const (
 	itemRelationLabel
 	itemLeftRelation
 	itemRightRelation
-	itemLeftAttribs
-	itemRightAttribs
+	itemAttributesStart
+	itemAttributesEnd
 	itemAttribSeparator
 	itemAttribIdentifier
 	itemAttribValue
@@ -294,7 +294,7 @@ func lexNodeStart(l *lexer) stateFn {
 		return nil
 	}
 
-	i := l.thisItem(itemStartNode)
+	i := l.thisItem(itemNodeStart)
 	l.emitItem(i)
 
 	return lexNodeInner
@@ -350,7 +350,7 @@ func lexAttribStart(l *lexer) stateFn {
 		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
 	}
 
-	i := l.thisItem(itemLeftAttribs)
+	i := l.thisItem(itemAttributesStart)
 	l.emitItem(i)
 	return lexNodeAttrib
 }
@@ -361,7 +361,7 @@ func lexAttribEnd(l *lexer) stateFn {
 		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
 	}
 
-	i := l.thisItem(itemRightAttribs)
+	i := l.thisItem(itemAttributesEnd)
 	l.emitItem(i)
 	return lexNodeInner
 }
@@ -561,7 +561,7 @@ func lexRelationAttribStart(l *lexer) stateFn {
 		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
 	}
 
-	i := l.thisItem(itemLeftAttribs)
+	i := l.thisItem(itemAttributesStart)
 	l.emitItem(i)
 	return lexRelationAttrib
 }
@@ -572,7 +572,7 @@ func lexRelationAttribEnd(l *lexer) stateFn {
 		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
 	}
 
-	i := l.thisItem(itemRightAttribs)
+	i := l.thisItem(itemAttributesEnd)
 	l.emitItem(i)
 	return lexRelationInner
 }
