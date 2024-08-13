@@ -44,7 +44,12 @@ var fedCmd = &cobra.Command{
 			panic(err)
 		}
 
-		stateStore, err := datastore.NewInternalState([]string{}, []string{})
+		migrationsDir, err := cmd.Flags().GetString("migrations")
+		if err != nil {
+			panic(err)
+		}
+
+		stateStore, err := datastore.NewInternalState(migrationsDir, []string{}, []string{})
 		if err != nil {
 			logger.Error("store init", "error", err)
 			panic("unable to init state store")

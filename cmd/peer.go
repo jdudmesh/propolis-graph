@@ -41,6 +41,11 @@ var peerCmd = &cobra.Command{
 			panic(err)
 		}
 
+		migrationsDir, err := cmd.Flags().GetString("migrations")
+		if err != nil {
+			panic(err)
+		}
+
 		seeds, err := cmd.Flags().GetStringArray("seed")
 		if err != nil {
 			panic(err)
@@ -51,7 +56,7 @@ var peerCmd = &cobra.Command{
 			panic(err)
 		}
 
-		stateStore, err := datastore.NewInternalState(seeds, subs)
+		stateStore, err := datastore.NewInternalState(migrationsDir, seeds, subs)
 		if err != nil {
 			logger.Error("store init", "error", err)
 			panic("unable to init state store")

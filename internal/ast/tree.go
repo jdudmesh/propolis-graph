@@ -5,18 +5,69 @@ import (
 	"fmt"
 )
 
-type node interface {
+var (
+	ErrUnexpectedEndOfInput = errors.New("unexpected end of input")
+)
+
+type ParseableEntity interface {
 	Parse(p *parser) error
-	Execute() error
+	Identifier() string
+	Labels() []string
+	Attributes() map[string]any
 }
 
-type Merge struct {
+type MergeCmd struct {
 }
 
-type Node struct {
+type MatchCmd struct {
+}
+
+type Entity struct {
 	identifier string
 	labels     []string
 	attributes map[string]any
+}
+
+func (e Entity) Identifier() string {
+	return e.identifier
+}
+
+func (e Entity) Labels() []string {
+	return e.labels
+}
+
+func (e Entity) Attributes() map[string]any {
+	return e.attributes
+}
+
+func (e *Entity) parseAttr(p *parser) error {
+	pendingVar := ""
+	for {
+		i := p.pop()
+		switch i.typ {
+		case itemAttributesEnd:
+			p.accept()
+			return nil
+		case itemAttribSeparator:
+			p.accept()
+		case itemAttribIdentifier:
+			pendingVar = i.val
+		case itemAttribValue:
+			if pendingVar == "" {
+				return fmt.Errorf("unexpected input: %s (%d)", i.val, i.pos)
+			}
+			e.attributes[pendingVar] = i.val
+			pendingVar = ""
+		case itemEOF:
+			return ErrUnexpectedEndOfInput
+		default:
+			return fmt.Errorf("unknown token: %s (%d)", i.val, i.pos)
+		}
+	}
+}
+
+type Node struct {
+	Entity
 }
 
 type RelationDir int
@@ -28,108 +79,116 @@ const (
 )
 
 type Relation struct {
-	dir RelationDir
+	Entity
+	Direction RelationDir
 }
 
-func (m *Merge) Parse(p *parser) error {
+func (m *MergeCmd) Parse(p *parser) error {
 	p.accept()
 	return nil
 }
 
-func (m *Merge) Execute() error {
+func (m *MergeCmd) Identifier() string {
+	return "MERGE"
+}
+
+func (m *MergeCmd) Labels() []string {
+	return nil
+}
+
+func (m *MergeCmd) Attributes() map[string]any {
+	return nil
+}
+
+func (m *MatchCmd) Parse(p *parser) error {
+	p.accept()
+	return nil
+}
+
+func (m *MatchCmd) Identifier() string {
+	return "MATCH"
+}
+
+func (m *MatchCmd) Labels() []string {
+	return nil
+}
+
+func (m *MatchCmd) Attributes() map[string]any {
 	return nil
 }
 
 func (n *Node) Parse(p *parser) error {
-outer:
 	for {
 		i := p.pop()
 		switch i.typ {
-		case itemEOF:
-			return errors.New("unexpected end of input")
 		case itemNodeIdentifier:
 			n.identifier = i.val
+			p.accept()
+		case itemNodeLabelStart:
+			p.accept()
 		case itemNodeLabel:
 			n.labels = append(n.labels, i.val)
-		case itemAttributesStart:
-			n.parseAttr(p)
-		case itemEndNode:
-			break outer
-		}
-	}
-
-	def := p.accept()
-	for _, x := range def {
-		fmt.Printf("%02d: %s", x.typ, x.val)
-	}
-
-	return nil
-}
-
-func (n *Node) parseAttr(p *parser) error {
-	pendingVar := ""
-	for {
-		i := p.pop()
-		switch i.typ {
-		case itemEOF:
-			return errors.New("unexpected end of input")
-		case itemAttributesEnd:
 			p.accept()
-			return nil
-		case itemAttribSeparator:
-			continue
-		case itemAttribIdentifier:
-			pendingVar = i.val
-		case itemAttribValue:
-			if pendingVar == "" {
-				return errors.New("unexpected token")
+		case itemAttributesStart:
+			err := n.parseAttr(p)
+			if err != nil {
+				return err
 			}
-			n.attributes[pendingVar] = i.val
-			fallthrough
+		case itemEndNode:
+			return nil
+		case itemEOF:
+			return ErrUnexpectedEndOfInput
 		default:
-			pendingVar = ""
+			return fmt.Errorf("unknown token: %s (%d)", i.val, i.pos)
 		}
 	}
-}
-
-func (n *Node) Execute() error {
-	return nil
 }
 
 func (r *Relation) Parse(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
-		case itemEOF:
-			return errors.New("unexpected end of input")
 		case itemRelationDirNeutral:
 			p.accept()
 			return nil
 		case itemRelationDirLeft:
-			r.dir = RelationDirLeft
+			r.Direction = RelationDirLeft
 		case itemRelationDirRight:
-			r.dir = RelationDirRight
+			r.Direction = RelationDirRight
 			p.accept()
 			return nil
 		case itemRelationStart:
 			r.parseInner(p)
+		case itemEOF:
+			return ErrUnexpectedEndOfInput
+		default:
+			return fmt.Errorf("unknown token: %s (%d)", i.val, i.pos)
 		}
 	}
-	return nil
 }
 
 func (r *Relation) parseInner(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
+		case itemRelationLabelStart:
+			p.accept()
+		case itemRelationLabel:
+			r.labels = append(r.labels, i.val)
+			p.accept()
+		case itemAttributesStart:
+			err := r.parseAttr(p)
+			if err != nil {
+				return err
+			}
+			p.accept()
 		case itemRelationEnd:
 			p.accept()
 			return nil
+		case itemEOF:
+			return ErrUnexpectedEndOfInput
+		default:
+			return fmt.Errorf("unknown token: %s (%d)", i.val, i.pos)
 		}
 	}
-	return nil
-}
-
-func (r *Relation) Execute() error {
-	return nil
 }

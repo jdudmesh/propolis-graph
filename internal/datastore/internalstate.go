@@ -16,13 +16,13 @@ type internalStateStore struct {
 	db *sqlx.DB
 }
 
-func NewInternalState(seeds, subs []string) (*internalStateStore, error) {
+func NewInternalState(migrationsDir string, seeds, subs []string) (*internalStateStore, error) {
 	db, err := sqlx.Connect("sqlite3", "file::memory:?cache=shared")
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
 
-	err = createStateSchema(db)
+	err = createSchema(db, migrationsDir)
 	if err != nil {
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
@@ -530,4 +530,12 @@ func (s *internalStateStore) TouchPeer(remoteAddr string) error {
 		return fmt.Errorf("touch peer: %w", err)
 	}
 	return nil
+}
+
+func (s *internalStateStore) CreateTx(ctx context.Context) (*sqlx.Tx, error) {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create tx: %w", err)
+	}
+	return tx, nil
 }

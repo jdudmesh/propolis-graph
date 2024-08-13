@@ -1,20 +1,24 @@
 package ast
 
 type parser struct {
-	items []item
-	start int
-	pos   int
-	nodes []node
+	items    []item
+	start    int
+	pos      int
+	entities []ParseableEntity
 }
 
-func parse(l *lexer) *parser {
+func Parse(l *lexer) *parser {
 	return &parser{
-		items: l.items,
-		nodes: []node{},
+		items:    l.items,
+		entities: []ParseableEntity{},
 	}
 }
 
-func (p *parser) run() error {
+func (p *parser) Entities() []ParseableEntity {
+	return p.entities
+}
+
+func (p *parser) Run() error {
 	for {
 		var err error
 		i := p.pop()
@@ -24,6 +28,7 @@ func (p *parser) run() error {
 		case itemNodeStart:
 			err = p.node()
 		case itemRelationDirNeutral:
+			fallthrough
 		case itemRelationDirLeft:
 			err = p.relation()
 		case itemEOF:
@@ -52,30 +57,40 @@ func (p *parser) accept() []item {
 	return res
 }
 
-func (p *parser) peek() item {
-	return p.items[p.pos]
-}
-
-func (p *parser) addNode(n node) {
-	p.nodes = append(p.nodes, n)
+func (p *parser) add(n ParseableEntity) {
+	p.entities = append(p.entities, n)
 }
 
 func (p *parser) merge() error {
-	m := &Merge{}
+	m := &MergeCmd{}
 	err := m.Parse(p)
 	if err != nil {
 		return err
 	}
 
-	p.addNode(m)
+	p.add(m)
+
+	return nil
+}
+
+func (p *parser) match() error {
+	m := &MatchCmd{}
+	err := m.Parse(p)
+	if err != nil {
+		return err
+	}
+
+	p.add(m)
 
 	return nil
 }
 
 func (p *parser) node() error {
 	n := &Node{
-		labels:     []string{},
-		attributes: map[string]any{},
+		Entity: Entity{
+			labels:     []string{},
+			attributes: map[string]any{},
+		},
 	}
 
 	err := n.Parse(p)
@@ -83,19 +98,24 @@ func (p *parser) node() error {
 		return err
 	}
 
-	p.addNode(n)
+	p.add(n)
 
 	return nil
 }
 
 func (p *parser) relation() error {
-	r := &Relation{}
+	r := &Relation{
+		Entity: Entity{
+			labels:     []string{},
+			attributes: map[string]any{},
+		},
+	}
 	err := r.Parse(p)
 	if err != nil {
 		return err
 	}
 
-	p.addNode(r)
+	p.add(r)
 
 	return nil
 }

@@ -219,7 +219,7 @@ func (l *lexer) errorf(format string, args ...any) stateFn {
 
 // nextItem returns the next item from the input.
 // Called by the parser, not in the lexing goroutine.
-func (l *lexer) run() {
+func (l *lexer) Run() {
 	state := lexClause
 	for {
 		state = state(l)
@@ -229,8 +229,8 @@ func (l *lexer) run() {
 	}
 }
 
-// lex creates a new scanner for the input string.
-func lex(name, input string) *lexer {
+// Lex creates a new scanner for the input string.
+func Lex(name, input string) *lexer {
 	l := &lexer{
 		name:  name,
 		input: input,
