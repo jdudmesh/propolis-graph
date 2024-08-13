@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -18,10 +19,16 @@ func TestExecutor(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 
-	store, err := datastore.NewInternalState("./migrations", []string{}, []string{})
+	cur := os.Getenv("WORKSPACE_DIR")
+	//dbConn := "file::memory:?cache=shared"
+	dbConn := fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cur)
+	store, err := datastore.NewInternalState(dbConn, cur+"/migrations", []string{}, []string{})
 	assert.NoError(err)
+	if store == nil {
+		t.Fatal("no store")
+	}
 
-	testStatement := `MERGE (i:Identity:Person {id: '987654'})-[:POSTED]->(p:Post {id: "123456", uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
+	testStatement := `MERGE (i:Identity:Person {name: 'john'})-[:posted{}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
 
 	l := ast.Lex("test", testStatement)
 	l.Run()
@@ -36,4 +43,5 @@ func TestExecutor(t *testing.T) {
 
 	err = e.Execute()
 	assert.NoError(err)
+
 }

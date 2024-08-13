@@ -311,9 +311,9 @@ func lexNodeInner(l *lexer) stateFn {
 	case n == ':':
 		return lexNodeLabelStart
 	case n == '{':
-		return lexAttribStart
+		return lexNodeAttribStart
 	case n == '}':
-		return lexAttribEnd
+		return lexNodeAttribEnd
 	case n == ')':
 		return lexNodeEnd
 	}
@@ -344,7 +344,7 @@ func lexNodeLabel(l *lexer) stateFn {
 	return lexNodeInner
 }
 
-func lexAttribStart(l *lexer) stateFn {
+func lexNodeAttribStart(l *lexer) stateFn {
 	r := l.next()
 	if r != '{' {
 		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
@@ -355,7 +355,7 @@ func lexAttribStart(l *lexer) stateFn {
 	return lexNodeAttrib
 }
 
-func lexAttribEnd(l *lexer) stateFn {
+func lexNodeAttribEnd(l *lexer) stateFn {
 	r := l.next()
 	if r != '}' {
 		l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
@@ -381,7 +381,7 @@ func lexNodeAttrib(l *lexer) stateFn {
 		l.ignore()
 		return lexNodeAttrib
 	case n == '}':
-		return lexAttribEnd
+		return lexNodeAttribEnd
 	}
 
 	return nil
@@ -592,7 +592,7 @@ func lexRelationAttrib(l *lexer) stateFn {
 		l.ignore()
 		return lexRelationAttrib
 	case n == '}':
-		return lexAttribEnd
+		return lexRelationAttribEnd
 	}
 
 	return nil

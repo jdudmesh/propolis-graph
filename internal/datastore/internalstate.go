@@ -16,8 +16,8 @@ type internalStateStore struct {
 	db *sqlx.DB
 }
 
-func NewInternalState(migrationsDir string, seeds, subs []string) (*internalStateStore, error) {
-	db, err := sqlx.Connect("sqlite3", "file::memory:?cache=shared")
+func NewInternalState(databaseURL, migrationsDir string, seeds, subs []string) (*internalStateStore, error) {
+	db, err := sqlx.Connect("sqlite3", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
@@ -42,100 +42,6 @@ func NewInternalState(migrationsDir string, seeds, subs []string) (*internalStat
 	}
 
 	return store, nil
-
-}
-
-func createStateSchema(db *sqlx.DB) error {
-	_, err := db.Exec(`
-		create table seeds (
-			remote_addr text not null primary key,
-			created_at datetime not null,
-			updated_at datetime null
-		);
-	`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-		create table local_subs (
-			spec text not null primary key,
-			created_at datetime not null,
-			updated_at datetime null
-		);
-	`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-		create table peers (
-			remote_addr text not null primary key,
-			created_at datetime not null,
-			updated_at datetime null
-		);
-	`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-		create table subs (
-			remote_addr text not null,
-			spec text not null,
-			created_at datetime not null,
-			updated_at datetime null,
-			primary key(remote_addr, spec),
-			foreign key(remote_addr) references peers(remote_addr)
-		);
-	`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`create index idx_subs_peerspec on subs(remote_addr, spec);`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`create index idx_subs_spec on subs(spec);`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-		create table actions (
-			id text not null primary key,
-			created_at datetime not null,
-			updated_at datetime null,
-			action text not null,
-			remote_addr text not null
-		);
-	`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`create index idx_actions_peer on actions(remote_addr);`)
-	if err != nil {
-		return err
-	}
-
-	_, err = db.Exec(`
-		create table pending_subs (
-			remote_addr text not null,
-			spec text not null,
-			created_at datetime not null,
-			updated_at datetime null,
-			primary key(remote_addr, spec),
-			foreign key(remote_addr) references peers(remote_addr)
-		);
-	`)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
 func (s *internalStateStore) UpsertSeeds(seeds []string) error {

@@ -89,7 +89,7 @@ func (p *parser) node() error {
 	n := &Node{
 		Entity: Entity{
 			labels:     []string{},
-			attributes: map[string]any{},
+			attributes: map[string]Attribute{},
 		},
 	}
 
@@ -107,7 +107,7 @@ func (p *parser) relation() error {
 	r := &Relation{
 		Entity: Entity{
 			labels:     []string{},
-			attributes: map[string]any{},
+			attributes: map[string]Attribute{},
 		},
 	}
 	err := r.Parse(p)

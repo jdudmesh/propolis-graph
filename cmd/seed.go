@@ -39,6 +39,11 @@ var seedCmd = &cobra.Command{
 			panic(err)
 		}
 
+		dbConn, err := cmd.Flags().GetString("db")
+		if err != nil {
+			panic(err)
+		}
+
 		migrationsDir, err := cmd.Flags().GetString("migrations")
 		if err != nil {
 			panic(err)
@@ -49,7 +54,7 @@ var seedCmd = &cobra.Command{
 			panic(err)
 		}
 
-		stateStore, err := datastore.NewInternalState(migrationsDir, seeds, []string{})
+		stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, seeds, []string{})
 		if err != nil {
 			logger.Error("store init", "error", err)
 			panic("unable to init state store")
