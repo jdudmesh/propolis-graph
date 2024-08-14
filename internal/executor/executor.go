@@ -152,33 +152,33 @@ func (e *NodeEntity) finaliseLabels(tx *sqlx.Tx) error {
 	}
 
 	for rows.Next() {
-		s := struct {
+		l := struct {
 			ID    string `db:"id"`
 			Label string `db:"label"`
 		}{}
-		err = rows.StructScan(&s)
+		err = rows.StructScan(&l)
 		if err != nil {
 			return fmt.Errorf("scanning label: %w", err)
 		}
-		labels[s.Label] = s.ID
+		labels[l.Label] = l.ID
 	}
 
 	now := time.Now().UTC()
-	for _, label := range e.node.Labels() {
+	for _, l := range e.node.Labels() {
 		id := ""
-		if l, ok := labels[label]; ok {
-			id = l
+		if lid, ok := labels[l]; ok {
+			id = lid
 		} else {
 			id, err = gonanoid.New()
 			if err != nil {
 				return fmt.Errorf("label id: %w", err)
 			}
 		}
-		_, err = tx.Exec("insert into node_labels(id, created_at, node_id, label) values(?, ?, ?, ?) on conflict(id) do update set updated_at = ?", id, now, e.id, label, now)
+		_, err = tx.Exec("insert into node_labels(id, created_at, node_id, label) values(?, ?, ?, ?) on conflict(id) do update set updated_at = ?", id, now, e.id, l, now)
 		if err != nil {
 			return fmt.Errorf("inserting label: %w", err)
 		}
-		delete(labels, id)
+		delete(labels, l)
 	}
 
 	for _, id := range labels {
@@ -203,21 +203,21 @@ func (e *NodeEntity) finaliseAttributes(tx *sqlx.Tx) error {
 	}
 
 	for rows.Next() {
-		s := struct {
+		a := struct {
 			ID       string `db:"id"`
 			AttrName string `db:"attr_name"`
 		}{}
-		err = rows.StructScan(&s)
+		err = rows.StructScan(&a)
 		if err != nil {
 			return fmt.Errorf("scanning attr: %w", err)
 		}
-		attrs[s.AttrName] = s.ID
+		attrs[a.AttrName] = a.ID
 	}
 
 	now := time.Now().UTC()
-	for _, v := range e.node.Attributes() {
+	for _, a := range e.node.Attributes() {
 		id := ""
-		if l, ok := attrs[v.Key]; ok {
+		if l, ok := attrs[a.Key]; ok {
 			id = l
 		} else {
 			id, err = gonanoid.New()
@@ -228,11 +228,11 @@ func (e *NodeEntity) finaliseAttributes(tx *sqlx.Tx) error {
 		_, err = tx.Exec(`
 			insert into node_attributes(id, created_at, node_id, attr_name, attr_value, data_type)
 			values(?, ?, ?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, e.id, v.Key, v.Value, v.Type, now, v.Value)
+			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, e.id, a.Key, a.Value, a.Type, now, a.Value)
 		if err != nil {
 			return fmt.Errorf("inserting attr: %w", err)
 		}
-		delete(attrs, id)
+		delete(attrs, a.Key)
 	}
 
 	for _, id := range attrs {
@@ -261,7 +261,7 @@ func (e *NodeEntity) checkExists(tx *sqlx.Tx) (bool, error) {
 			args = append(args, v.Value)
 			i++
 		}
-		for l := range e.node.Labels() {
+		for _, l := range e.node.Labels() {
 			query.WriteString(fmt.Sprintf("inner join (select * from node_labels where label = ?) nl%d on n.id = nl%d.node_id\n", i, i))
 			args = append(args, l)
 			i++
