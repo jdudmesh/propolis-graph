@@ -41,6 +41,8 @@ type Relation struct {
 	Direction   ast.RelationDir      `db:"direction"`
 	labels      []*RelationLabel     `db:"-"`
 	attributes  []*RelationAttribute `db:"-"`
+	leftNode    *Node                `db:"-"`
+	rightNode   *Node                `db:"-"`
 }
 
 type RelationAttribute struct {
