@@ -24,7 +24,6 @@ type Attribute interface {
 
 type Entity interface {
 	ID() EntityID
-	WithID(EntityID) Entity
 	Type() EntityType
 	Identifier() string
 	Labels() []string
@@ -103,11 +102,6 @@ type attribute struct {
 
 func (e entity) ID() EntityID {
 	return e.id
-}
-
-func (e *entity) WithID(id EntityID) Entity {
-	e.id = id
-	return e
 }
 
 func (e entity) Type() EntityType {
@@ -214,10 +208,6 @@ func (m *mergeCmd) ID() EntityID {
 	return EntityID("MERGE")
 }
 
-func (m *mergeCmd) WithID(id EntityID) Entity {
-	panic("not supported")
-}
-
 func (m *mergeCmd) Type() EntityType {
 	return EntityTypeMergeCmd
 }
@@ -263,10 +253,6 @@ func (m *matchCmd) parse(p *parser) error {
 
 func (m *matchCmd) ID() EntityID {
 	return EntityID("MATCH")
-}
-
-func (m *matchCmd) WithID(id EntityID) Entity {
-	panic("not supported")
 }
 
 func (m *matchCmd) Type() EntityType {

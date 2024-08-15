@@ -14,15 +14,18 @@ import (
 	gonanoid "github.com/matoous/go-nanoid/v2"
 )
 
+var (
+	ErrNotFound = errors.New("not found")
+)
+
 type store interface {
 	CreateTx(ctx context.Context) (*sqlx.Tx, error)
 }
 
 type executor struct {
-	stmt       ast.Entity
-	store      store
-	logger     *slog.Logger
-	start, pos int
+	stmt   ast.Entity
+	store  store
+	logger *slog.Logger
 }
 
 func New(stmt ast.Entity, s store, logger *slog.Logger) (*executor, error) {
@@ -33,7 +36,7 @@ func New(stmt ast.Entity, s store, logger *slog.Logger) (*executor, error) {
 	}, nil
 }
 
-func (e *executor) Execute() (ast.Entity, error) {
+func (e *executor) Execute() (*Node, error) {
 	if e.stmt == nil {
 		return nil, errors.New("no command found")
 	}
@@ -46,7 +49,7 @@ func (e *executor) Execute() (ast.Entity, error) {
 		return nil, fmt.Errorf("creating tx: %w", err)
 	}
 
-	var res ast.Entity
+	var res *Node
 	switch e.stmt.Type() {
 	case ast.EntityTypeMergeCmd:
 		res, err = e.finaliseMergeCmd(e.stmt.(ast.Command), tx)
@@ -445,17 +448,142 @@ func (e *executor) finaliseRelationAttributes(r ast.Relation, tx *sqlx.Tx) error
 	return nil
 }
 
-func (e *executor) finaliseMergeCmd(mergeCmd ast.Command, tx *sqlx.Tx) (ast.Entity, error) {
-	switch mergeCmd.Entity().Type() {
+func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (*Node, error) {
+	var node *Node
+	var err error
+
+	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
-		return mergeCmd.Entity(), e.finaliseNode(mergeCmd.Entity(), tx)
+		node, err = e.finaliseNode(cmd.Entity(), tx)
 	case ast.EntityTypeRelation:
-		return mergeCmd.Entity(), e.finaliseRelation(mergeCmd.Entity().(ast.Relation), tx)
+		node, err = e.finaliseRelation(cmd.Entity().(ast.Relation), tx)
 	default:
-		return nil, fmt.Errorf("unknown entity: %v", mergeCmd.Entity())
+		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
+	}
+	return node, err
+}
+
+func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (*Node, error) {
+	switch cmd.Entity().Type() {
+	case ast.EntityTypeNode:
+		return e.queryNodes(cmd.Entity(), tx)
+	default:
+		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
 	}
 }
 
-func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (ast.Entity, error) {
-	return nil, nil
+func (e *executor) findNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
+	args := []any{}
+	query := strings.Builder{}
+	query.WriteString("select n.* from nodes n\n")
+
+	if val, ok := n.Attribute("id"); ok {
+		query.WriteString("where n.id = ?")
+		args = append(args, val)
+	} else {
+		i := 0
+		for _, v := range n.Attributes() {
+			query.WriteString(fmt.Sprintf(`
+				inner join (select * from node_attributes where attr_name = ? and attr_value = ?) na%d
+				on n.id = na%d.node_id
+			`, i, i))
+			args = append(args, v.Key)
+			args = append(args, v.Value)
+			i++
+		}
+		for _, l := range n.Labels() {
+			query.WriteString(fmt.Sprintf(`
+				inner join (select * from node_labels where label = ?) nl%d
+				on n.id = nl%d.node_id
+			`, i, i))
+			args = append(args, l)
+			i++
+		}
+	}
+
+	// TODO: check only one matching row
+
+	res := &Node{}
+	err := tx.Get(res, query.String(), args...)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("fetching node: %w", err)
+		}
+		return nil, ErrNotFound
+	}
+
+	res.attributes = []*NodeAttribute{}
+	err = tx.Select(&res.attributes, "select * from node_attributes where node_id = ?", res.ID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("fetching node: %w", err)
+		}
+	}
+
+	res.labels = []*NodeLabel{}
+	err = tx.Select(&res.labels, "select * from node_labels where node_id = ?", res.ID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("fetching node: %w", err)
+		}
+	}
+
+	return res, nil
+}
+
+func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
+	args := []any{}
+	query := strings.Builder{}
+	query.WriteString("select r.* from relations r\n")
+
+	if val, ok := r.Attribute("id"); ok {
+		query.WriteString("where r.id = ?")
+		args = append(args, val)
+	} else {
+		i := 0
+		for _, v := range r.Attributes() {
+			query.WriteString(fmt.Sprintf(`
+				inner join (select * from relation_attributes where attr_name = ? and attr_value = ?) ra%d
+				on r.id = ra%d.relation_id
+			`, i, i))
+			args = append(args, v.Key)
+			args = append(args, v.Value)
+			i++
+		}
+		for _, l := range r.Labels() {
+			query.WriteString(fmt.Sprintf(`
+				inner join (select * from relation_labels where label = ?) rl%d
+				on r.id = rl%d.relation_id`, i, i))
+			args = append(args, l)
+			i++
+		}
+	}
+
+	// TODO: check only one matching row
+
+	res := &Relation{}
+	err := tx.Get(res, query.String(), args...)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("checking existing: %w", err)
+		}
+		return nil, ErrNotFound
+	}
+	res.attributes = []*RelationAttribute{}
+	err = tx.Select(&res.attributes, "select * from relation_attributes where relation_id = ?", res.ID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("fetching relation: %w", err)
+		}
+	}
+
+	res.labels = []*RelationLabel{}
+	err = tx.Select(&res.labels, "select * from relation_labels where relation_id = ?", res.ID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("fetching relation: %w", err)
+		}
+	}
+
+	return res, nil
 }
