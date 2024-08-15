@@ -200,56 +200,6 @@ func (e *executor) finaliseNodeAttributes(n ast.Entity, tx *sqlx.Tx) error {
 	return nil
 }
 
-func (e *executor) checkNodeExists(n ast.Entity, tx *sqlx.Tx) (bool, error) {
-	args := []any{}
-	query := strings.Builder{}
-	query.WriteString("select n.id from nodes n\n")
-
-	if val, ok := n.Attribute("id"); ok {
-		query.WriteString("where n.id = ?")
-		args = append(args, val)
-	} else {
-		i := 0
-		for _, v := range n.Attributes() {
-			query.WriteString(fmt.Sprintf(`
-				inner join (select * from node_attributes where attr_name = ? and attr_value = ?) na%d
-				on n.id = na%d.node_id
-			`, i, i))
-			args = append(args, v.Key)
-			args = append(args, v.Value)
-			i++
-		}
-		for _, l := range n.Labels() {
-			query.WriteString(fmt.Sprintf(`
-				inner join (select * from node_labels where label = ?) nl%d
-				on n.id = nl%d.node_id
-			`, i, i))
-			args = append(args, l)
-			i++
-		}
-	}
-
-	// TODO: check only one matching row
-
-	id := ""
-	isNew := false
-	err := tx.Get(&id, query.String(), args...)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("checking existing: %w", err)
-		}
-		isNew = true
-		id, err = gonanoid.New()
-		if err != nil {
-			return false, fmt.Errorf("generating id: %w", err)
-		}
-	}
-
-	n.WithID(ast.EntityID(id))
-
-	return !isNew, nil
-}
-
 func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) error {
 	err := e.finaliseNode(r.Left(), tx)
 	if err != nil {
@@ -261,9 +211,11 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) error {
 		return fmt.Errorf("finalising right node: %w", err)
 	}
 
-	_, err = e.checkRelationExists(r, tx)
+	existing, err := e.findRelation(r, tx)
 	if err != nil {
-		return err
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -274,7 +226,7 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) error {
 		updated_at = ?,
 		left_node_id = ?,
 		right_node_id = ?,
-		direction = ?`, r.ID(), now, r.Left().ID(), r.Right().ID(), r.Direction(), now, r.Left().ID(), r.Right().ID(), r.Direction())
+		direction = ?`, existing.ID, now, existing.le r.Left().ID(), r.Right().ID(), r.Direction(), now, r.Left().ID(), r.Right().ID(), r.Direction())
 	if err != nil {
 		return fmt.Errorf("upserting relation: %w", err)
 	}
@@ -290,54 +242,6 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) error {
 	}
 
 	return nil
-}
-
-func (e *executor) checkRelationExists(r ast.Relation, tx *sqlx.Tx) (bool, error) {
-	args := []any{}
-	query := strings.Builder{}
-	query.WriteString("select r.id from relations r\n")
-
-	if val, ok := r.Attribute("id"); ok {
-		query.WriteString("where r.id = ?")
-		args = append(args, val)
-	} else {
-		i := 0
-		for _, v := range r.Attributes() {
-			query.WriteString(fmt.Sprintf(`
-				inner join (select * from relation_attributes where attr_name = ? and attr_value = ?) ra%d
-				on r.id = ra%d.relation_id
-			`, i, i))
-			args = append(args, v.Key)
-			args = append(args, v.Value)
-			i++
-		}
-		for _, l := range r.Labels() {
-			query.WriteString(fmt.Sprintf(`
-				inner join (select * from relation_labels where label = ?) rl%d
-				on r.id = rl%d.relation_id`, i, i))
-			args = append(args, l)
-			i++
-		}
-	}
-
-	// TODO: check only one matching row
-
-	id := ""
-	isNew := false
-	err := tx.Get(&id, query.String(), args...)
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("checking existing: %w", err)
-		}
-		isNew = true
-		id, err = gonanoid.New()
-		if err != nil {
-			return false, fmt.Errorf("generating id: %w", err)
-		}
-	}
-	r.WithID(ast.EntityID(id))
-
-	return !isNew, nil
 }
 
 func (e *executor) finaliseRelationLabels(r ast.Relation, tx *sqlx.Tx) error {
@@ -587,3 +491,5 @@ func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
 
 	return res, nil
 }
+
+populateRelation
