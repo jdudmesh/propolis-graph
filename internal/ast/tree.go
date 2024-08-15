@@ -9,19 +9,6 @@ var (
 	ErrUnexpectedEndOfInput = errors.New("unexpected end of input")
 )
 
-type ParseableEntity interface {
-	Parse(p *parser) error
-	Identifier() string
-	Labels() []string
-	Attributes() map[string]Attribute
-}
-
-type MergeCmd struct {
-}
-
-type MatchCmd struct {
-}
-
 type AttributeDataType int
 
 const (
@@ -29,20 +16,64 @@ const (
 	AttributeDataTypeString
 )
 
-type Attribute struct {
-	Key   string
-	Value any
-	Type  AttributeDataType
+type Attribute interface {
+	Key() string
+	Value() any
+	Type() AttributeDataType
 }
 
-type Entity struct {
+type Entity interface {
+	ID() EntityID
+	WithID(EntityID) Entity
+	Type() EntityType
+	Identifier() string
+	Labels() []string
+	Attributes() map[string]Attribute
+	Attribute(string) (any, bool)
+}
+
+type Relation interface {
+	Entity
+	Direction() RelationDir
+	Left() Entity
+	Right() Entity
+}
+
+type parseable interface {
+	Entity
+	parse(p *parser) error
+}
+
+type mergeCmd struct {
+	entity Entity
+}
+
+type matchCmd struct {
+	entity Entity
+}
+
+type EntityID string
+type EntityType int
+
+const EntityIDNil = EntityID("")
+
+const (
+	EntityTypeNode EntityType = iota
+	EntityTypeRelation
+	EntityTypeMergeCmd
+	EntityTypeMatchCmd
+)
+
+type entity struct {
+	id         EntityID
+	typ        EntityType
 	identifier string
 	labels     []string
 	attributes map[string]Attribute
 }
 
-type Node struct {
-	Entity
+type node struct {
+	entity
 }
 
 type RelationDir int
@@ -53,24 +84,45 @@ const (
 	RelationDirRight
 )
 
-type Relation struct {
-	Entity
-	Direction RelationDir
+type relation struct {
+	entity
+	direction RelationDir
+	left      Entity
+	right     Entity
 }
 
-func (e Entity) Identifier() string {
+type attribute struct {
+	key   string
+	value any
+	typ   AttributeDataType
+}
+
+func (e entity) ID() EntityID {
+	return e.id
+}
+
+func (e *entity) WithID(id EntityID) Entity {
+	e.id = id
+	return e
+}
+
+func (e entity) Type() EntityType {
+	return e.typ
+}
+
+func (e entity) Identifier() string {
 	return e.identifier
 }
 
-func (e Entity) Labels() []string {
+func (e entity) Labels() []string {
 	return e.labels
 }
 
-func (e Entity) Attributes() map[string]Attribute {
+func (e entity) Attributes() map[string]Attribute {
 	return e.attributes
 }
 
-func (e Entity) Attribute(k string) (any, bool) {
+func (e entity) Attribute(k string) (any, bool) {
 	if val, ok := e.attributes[k]; ok {
 		return val, true
 	} else {
@@ -78,7 +130,7 @@ func (e Entity) Attribute(k string) (any, bool) {
 	}
 }
 
-func (e *Entity) parseAttr(p *parser) error {
+func (e *entity) parseAttr(p *parser) error {
 	attribKey := ""
 	for {
 		i := p.pop()
@@ -100,10 +152,10 @@ func (e *Entity) parseAttr(p *parser) error {
 				dataType = AttributeDataTypeString
 				attribValue = attribValue[1 : len(attribValue)-1]
 			}
-			e.attributes[attribKey] = Attribute{
-				Key:   attribKey,
-				Value: attribValue,
-				Type:  dataType,
+			e.attributes[attribKey] = &attribute{
+				key:   attribKey,
+				value: attribValue,
+				typ:   dataType,
 			}
 			attribKey = ""
 		case itemEOF:
@@ -114,41 +166,142 @@ func (e *Entity) parseAttr(p *parser) error {
 	}
 }
 
-func (m *MergeCmd) Parse(p *parser) error {
+func (m *mergeCmd) parse(p *parser) error {
 	p.accept()
-	return nil
+	for {
+		i := p.pop()
+		switch i.typ {
+		case itemEOF:
+			return nil
+		case itemNodeStart:
+			n, err := p.node()
+			if err != nil {
+				return err
+			}
+			if m.entity == nil {
+				m.entity = n
+				continue
+			}
+			if r, ok := m.entity.(*relation); !ok {
+				return fmt.Errorf("unexpected entity: %v", n)
+			} else {
+				r.right = n
+			}
+		case itemRelationDirNeutral:
+			fallthrough
+		case itemRelationDirLeft:
+			r, err := p.relation()
+			if err != nil {
+				return err
+			}
+			if n, ok := m.entity.(*node); !ok {
+				return fmt.Errorf("unexpected entity: %v", n)
+			} else {
+				m.entity = r
+				r.left = n
+			}
+		default:
+			return fmt.Errorf("unexpected item: %v", i)
+		}
+	}
 }
 
-func (m *MergeCmd) Identifier() string {
+func (m *mergeCmd) ID() EntityID {
+	return EntityID("MERGE")
+}
+
+func (m *mergeCmd) WithID(id EntityID) Entity {
+	panic("not supported")
+}
+
+func (m *mergeCmd) Type() EntityType {
+	return EntityTypeMergeCmd
+}
+
+func (m *mergeCmd) Identifier() string {
 	return "MERGE"
 }
 
-func (m *MergeCmd) Labels() []string {
+func (m *mergeCmd) Labels() []string {
 	return nil
 }
 
-func (m *MergeCmd) Attributes() map[string]Attribute {
+func (m *mergeCmd) Attributes() map[string]Attribute {
 	return nil
 }
 
-func (m *MatchCmd) Parse(p *parser) error {
+func (m *mergeCmd) Attribute(k string) (any, bool) {
+	return nil, false
+}
+
+func (m *matchCmd) parse(p *parser) error {
 	p.accept()
-	return nil
+	for {
+		i := p.pop()
+		switch i.typ {
+		case itemEOF:
+			return nil
+		case itemNodeStart:
+			n, err := p.node()
+			if err != nil {
+				return err
+			}
+			// TODO: for now we will only allow matches on single nodes
+			if m.entity != nil {
+				return fmt.Errorf("unexpected entity: %v", n)
+			}
+			m.entity = n
+		default:
+			return fmt.Errorf("unexpected item: %v", i)
+		}
+	}
 }
 
-func (m *MatchCmd) Identifier() string {
+func (m *matchCmd) ID() EntityID {
+	return EntityID("MATCH")
+}
+
+func (m *matchCmd) WithID(id EntityID) Entity {
+	panic("not supported")
+}
+
+func (m *matchCmd) Type() EntityType {
+	return EntityTypeMatchCmd
+}
+
+func (m *matchCmd) Identifier() string {
 	return "MATCH"
 }
 
-func (m *MatchCmd) Labels() []string {
+func (m *matchCmd) Labels() []string {
 	return nil
 }
 
-func (m *MatchCmd) Attributes() map[string]Attribute {
+func (m *matchCmd) Attributes() map[string]Attribute {
 	return nil
 }
 
-func (n *Node) Parse(p *parser) error {
+func (m *matchCmd) Attribute(k string) (any, bool) {
+	return nil, false
+}
+
+func (n *node) Type() EntityType {
+	return EntityTypeNode
+}
+
+func (n *node) Identifier() string {
+	return "MATCH"
+}
+
+func (n *node) Labels() []string {
+	return nil
+}
+
+func (n *node) Attributes() map[string]Attribute {
+	return nil
+}
+
+func (n *node) parse(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
@@ -175,7 +328,35 @@ func (n *Node) Parse(p *parser) error {
 	}
 }
 
-func (r *Relation) Parse(p *parser) error {
+func (r *relation) Type() EntityType {
+	return EntityTypeRelation
+}
+
+func (r *relation) Identifier() string {
+	return "MATCH"
+}
+
+func (r *relation) Labels() []string {
+	return nil
+}
+
+func (r *relation) Attributes() map[string]Attribute {
+	return nil
+}
+
+func (r *relation) Direction() RelationDir {
+	return r.direction
+}
+
+func (r *relation) Left() Entity {
+	return r.left
+}
+
+func (r *relation) Right() Entity {
+	return r.right
+}
+
+func (r *relation) parse(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
@@ -183,9 +364,9 @@ func (r *Relation) Parse(p *parser) error {
 			p.accept()
 			return nil
 		case itemRelationDirLeft:
-			r.Direction = RelationDirLeft
+			r.direction = RelationDirLeft
 		case itemRelationDirRight:
-			r.Direction = RelationDirRight
+			r.direction = RelationDirRight
 			p.accept()
 			return nil
 		case itemRelationStart:
@@ -198,7 +379,7 @@ func (r *Relation) Parse(p *parser) error {
 	}
 }
 
-func (r *Relation) parseInner(p *parser) error {
+func (r *relation) parseInner(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
@@ -222,4 +403,16 @@ func (r *Relation) parseInner(p *parser) error {
 			return fmt.Errorf("unknown token: %s (%d)", i.val, i.pos)
 		}
 	}
+}
+
+func (a attribute) Key() string {
+	return a.key
+}
+
+func (a attribute) Value() any {
+	return a.value
+}
+
+func (a attribute) Type() AttributeDataType {
+	return a.typ
 }

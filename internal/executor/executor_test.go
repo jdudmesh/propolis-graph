@@ -28,7 +28,7 @@ func TestExecutor(t *testing.T) {
 		t.Fatal("no store")
 	}
 
-	testStatement := `MERGE (i:Identity:Person {name: 'john'})-[:posted{}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
+	testStatement := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
 
 	l := ast.Lex("test", testStatement)
 	l.Run()
@@ -41,7 +41,8 @@ func TestExecutor(t *testing.T) {
 	assert.NotNil(e)
 	assert.NoError(err)
 
-	err = e.Execute()
+	ent, err := e.Execute()
 	assert.NoError(err)
+	assert.NotNil(ent)
 
 }

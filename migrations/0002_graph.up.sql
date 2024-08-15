@@ -48,6 +48,7 @@ create table relation_attributes (
   relation_id text not null,
   attr_name text not null,
   attr_value text not null,
+  data_type int not null,
   foreign key(relation_id) references relations(id)
 );
 

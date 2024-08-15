@@ -14,7 +14,7 @@ language spec: https://opencypher.org/ https://s3.amazonaws.com/artifacts.opency
 
 const (
 	alphanumeric = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	numeric      = "0123456789"
+	numeric      = "0123456789.E"
 	spaces       = " \t\n"
 	braces       = "{}"
 	colon        = ":"
@@ -629,7 +629,7 @@ func lexRelationAttribValue(l *lexer) stateFn {
 	l.acceptRun(spaces)
 	l.ignore()
 
-	l.acceptRun(alphanumeric + quotes + escapeChar)
+	l.acceptQuotedRun(numeric)
 	i := l.thisItem(itemAttribValue)
 	l.emitItem(i)
 

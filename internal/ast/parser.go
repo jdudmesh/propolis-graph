@@ -4,38 +4,56 @@ type parser struct {
 	items    []item
 	start    int
 	pos      int
-	entities []ParseableEntity
+	entities []parseable
 }
 
 func Parse(l *lexer) *parser {
 	return &parser{
 		items:    l.items,
-		entities: []ParseableEntity{},
+		entities: []parseable{},
 	}
 }
 
-func (p *parser) Entities() []ParseableEntity {
-	return p.entities
+func (p *parser) Entities() []Entity {
+	ents := make([]Entity, len(p.entities))
+	for i, v := range p.entities {
+		ents[i] = v
+	}
+	return ents
 }
 
 func (p *parser) Run() error {
 	for {
-		var err error
 		i := p.pop()
 		switch i.typ {
 		case itemMerge:
-			err = p.merge()
+			cmd, err := p.merge()
+			if err != nil {
+				return err
+			}
+			p.add(cmd)
+		case itemMatch:
+			cmd, err := p.match()
+			if err != nil {
+				return err
+			}
+			p.add(cmd)
 		case itemNodeStart:
-			err = p.node()
+			n, err := p.node()
+			if err != nil {
+				return err
+			}
+			p.add(n)
 		case itemRelationDirNeutral:
 			fallthrough
 		case itemRelationDirLeft:
-			err = p.relation()
+			r, err := p.relation()
+			if err != nil {
+				return err
+			}
+			p.add(r)
 		case itemEOF:
 			return nil
-		}
-		if err != nil {
-			return err
 		}
 	}
 }
@@ -57,65 +75,57 @@ func (p *parser) accept() []item {
 	return res
 }
 
-func (p *parser) add(n ParseableEntity) {
+func (p *parser) add(n parseable) {
 	p.entities = append(p.entities, n)
 }
 
-func (p *parser) merge() error {
-	m := &MergeCmd{}
-	err := m.Parse(p)
+func (p *parser) merge() (*mergeCmd, error) {
+	m := &mergeCmd{}
+	err := m.parse(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	p.add(m)
-
-	return nil
+	return m, nil
 }
 
-func (p *parser) match() error {
-	m := &MatchCmd{}
-	err := m.Parse(p)
+func (p *parser) match() (*matchCmd, error) {
+	m := &matchCmd{}
+	err := m.parse(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	p.add(m)
-
-	return nil
+	return m, nil
 }
 
-func (p *parser) node() error {
-	n := &Node{
-		Entity: Entity{
+func (p *parser) node() (*node, error) {
+	n := &node{
+		entity: entity{
 			labels:     []string{},
 			attributes: map[string]Attribute{},
 		},
 	}
 
-	err := n.Parse(p)
+	err := n.parse(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	p.add(n)
-
-	return nil
+	return n, nil
 }
 
-func (p *parser) relation() error {
-	r := &Relation{
-		Entity: Entity{
+func (p *parser) relation() (*relation, error) {
+	r := &relation{
+		entity: entity{
 			labels:     []string{},
 			attributes: map[string]Attribute{},
 		},
 	}
-	err := r.Parse(p)
+	err := r.parse(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	p.add(r)
-
-	return nil
+	return r, nil
 }
