@@ -39,6 +39,10 @@ type Relation interface {
 	Right() Entity
 }
 
+type Command interface {
+	Entity() Entity
+}
+
 type parseable interface {
 	Entity
 	parse(p *parser) error
@@ -415,4 +419,12 @@ func (a attribute) Value() any {
 
 func (a attribute) Type() AttributeDataType {
 	return a.typ
+}
+
+func (c mergeCmd) Entity() Entity {
+	return c.entity
+}
+
+func (c matchCmd) Entity() Entity {
+	return c.entity
 }

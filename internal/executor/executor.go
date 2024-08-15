@@ -18,40 +18,14 @@ type store interface {
 	CreateTx(ctx context.Context) (*sqlx.Tx, error)
 }
 
-type storeable interface {
-	finalise(*sqlx.Tx) (ast.Entity, error)
-}
-
-type command interface {
-	storeable
-	accept(*executor) error
-}
-
-type mergeCmd struct {
-	items []storeable
-}
-
-type matchCmd struct {
-	items []storeable
-}
-
-type nodeEntity struct {
-	node ast.Entity
-}
-
-type relationEntity struct {
-	relation ast.Relation
-}
-
 type executor struct {
-	stmt       []ast.Entity
+	stmt       ast.Entity
 	store      store
 	logger     *slog.Logger
 	start, pos int
-	cmd        command
 }
 
-func New(stmt []ast.Entity, s store, logger *slog.Logger) (*executor, error) {
+func New(stmt ast.Entity, s store, logger *slog.Logger) (*executor, error) {
 	return &executor{
 		stmt:   stmt,
 		logger: logger,
@@ -60,47 +34,10 @@ func New(stmt []ast.Entity, s store, logger *slog.Logger) (*executor, error) {
 }
 
 func (e *executor) Execute() (ast.Entity, error) {
-	for {
-		i := e.pop()
-		if i == nil {
-			if e.stmt == nil {
-				return nil, errors.New("no command found")
-			}
-			return e.Finalise()
-		}
-		switch i.Type() {
-		case ast.EntityTypeMatchCmd:
-			if e.cmd != nil {
-				return nil, fmt.Errorf("unexpected command: %v", i)
-			}
-			e.cmd = &matchCmd{
-				items: make([]storeable, 0),
-			}
-			e.cmd.accept(e)
-		case ast.EntityTypeMergeCmd:
-			if e.cmd != nil {
-				return nil, fmt.Errorf("unexpected command: %v", i)
-			}
-			e.cmd = &mergeCmd{
-				items: make([]storeable, 0),
-			}
-			e.cmd.accept(e)
-		default:
-			return nil, fmt.Errorf("unexpected token: %v", i)
-		}
+	if e.stmt == nil {
+		return nil, errors.New("no command found")
 	}
-}
 
-func (e *executor) pop() ast.Entity {
-	if e.pos >= len(e.stmt) {
-		return nil
-	}
-	i := e.stmt[e.pos]
-	e.pos++
-	return i
-}
-
-func (e *executor) Finalise() (ast.Entity, error) {
 	ctx, cancelFn := context.WithTimeout(context.Background(), 86400*time.Second)
 	defer cancelFn()
 
@@ -109,10 +46,14 @@ func (e *executor) Finalise() (ast.Entity, error) {
 		return nil, fmt.Errorf("creating tx: %w", err)
 	}
 
-	if e.cmd == nil {
-		return nil, errors.New("no command found")
+	var res ast.Entity
+	switch e.stmt.Type() {
+	case ast.EntityTypeMergeCmd:
+		res, err = e.finaliseMergeCmd(e.stmt.(ast.Command), tx)
+	case ast.EntityTypeMatchCmd:
+		res, err = e.finaliseMatchCmd(e.stmt.(ast.Command), tx)
 	}
-	res, err := e.cmd.finalise(tx)
+
 	if err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("finalising node: %w", err)
@@ -126,38 +67,38 @@ func (e *executor) Finalise() (ast.Entity, error) {
 	return res, nil
 }
 
-func (e *nodeEntity) finalise(tx *sqlx.Tx) (ast.Entity, error) {
-	_, err := e.checkExists(tx)
+func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) error {
+	_, err := e.checkNodeExists(n, tx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	now := time.Now().UTC()
-	_, err = tx.Exec(`insert into nodes(id, created_at) values(?, ?) on conflict(id) do update set updated_at = ?`, e.node.ID(), now, now)
+	_, err = tx.Exec(`insert into nodes(id, created_at) values(?, ?) on conflict(id) do update set updated_at = ?`, n.ID(), now, now)
 	if err != nil {
-		return nil, fmt.Errorf("upserting node: %w", err)
+		return fmt.Errorf("upserting node: %w", err)
 	}
 
-	err = e.finaliseLabels(tx)
+	err = e.finaliseNodeLabels(n, tx)
 	if err != nil {
-		return nil, fmt.Errorf("finalising labels: %w", err)
+		return fmt.Errorf("finalising labels: %w", err)
 	}
 
-	err = e.finaliseAttributes(tx)
+	err = e.finaliseNodeAttributes(n, tx)
 	if err != nil {
-		return nil, fmt.Errorf("finalising attrs: %w", err)
+		return fmt.Errorf("finalising attrs: %w", err)
 	}
 
-	return e, nil
+	return nil
 }
 
-func (e *nodeEntity) finaliseLabels(tx *sqlx.Tx) error {
-	if len(e.node.Labels()) == 0 {
+func (e *executor) finaliseNodeLabels(n ast.Entity, tx *sqlx.Tx) error {
+	if len(n.Labels()) == 0 {
 		return nil
 	}
 
 	labels := map[string]string{}
-	rows, err := tx.Queryx("select id, label from node_labels where node_id = ?", e.ID())
+	rows, err := tx.Queryx("select id, label from node_labels where node_id = ?", n.ID())
 	if err != nil {
 		return fmt.Errorf("querying labels: %w", err)
 	}
@@ -175,7 +116,7 @@ func (e *nodeEntity) finaliseLabels(tx *sqlx.Tx) error {
 	}
 
 	now := time.Now().UTC()
-	for _, l := range e.node.Labels() {
+	for _, l := range n.Labels() {
 		id := ""
 		if lid, ok := labels[l]; ok {
 			id = lid
@@ -185,7 +126,7 @@ func (e *nodeEntity) finaliseLabels(tx *sqlx.Tx) error {
 				return fmt.Errorf("label id: %w", err)
 			}
 		}
-		_, err = tx.Exec("insert into node_labels(id, created_at, node_id, label) values(?, ?, ?, ?) on conflict(id) do update set updated_at = ?", id, now, e.ID(), l, now)
+		_, err = tx.Exec("insert into node_labels(id, created_at, node_id, label) values(?, ?, ?, ?) on conflict(id) do update set updated_at = ?", id, now, n.ID(), l, now)
 		if err != nil {
 			return fmt.Errorf("inserting label: %w", err)
 		}
@@ -202,13 +143,13 @@ func (e *nodeEntity) finaliseLabels(tx *sqlx.Tx) error {
 	return nil
 }
 
-func (e *nodeEntity) finaliseAttributes(tx *sqlx.Tx) error {
-	if len(e.node.Attributes()) == 0 {
+func (e *executor) finaliseNodeAttributes(n ast.Entity, tx *sqlx.Tx) error {
+	if len(n.Attributes()) == 0 {
 		return nil
 	}
 
 	attrs := map[string]string{}
-	rows, err := tx.Queryx("select id, attr_name from node_attributes where node_id = ?", e.ID())
+	rows, err := tx.Queryx("select id, attr_name from node_attributes where node_id = ?", n.ID())
 	if err != nil {
 		return fmt.Errorf("querying attrs: %w", err)
 	}
@@ -226,7 +167,7 @@ func (e *nodeEntity) finaliseAttributes(tx *sqlx.Tx) error {
 	}
 
 	now := time.Now().UTC()
-	for _, a := range e.node.Attributes() {
+	for _, a := range n.Attributes() {
 		id := ""
 		if l, ok := attrs[a.Key()]; ok {
 			id = l
@@ -239,7 +180,7 @@ func (e *nodeEntity) finaliseAttributes(tx *sqlx.Tx) error {
 		_, err = tx.Exec(`
 			insert into node_attributes(id, created_at, node_id, attr_name, attr_value, data_type)
 			values(?, ?, ?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, e.ID(), a.Key, a.Value, a.Type, now, a.Value)
+			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, n.ID(), a.Key, a.Value, a.Type, now, a.Value)
 		if err != nil {
 			return fmt.Errorf("inserting attr: %w", err)
 		}
@@ -256,17 +197,17 @@ func (e *nodeEntity) finaliseAttributes(tx *sqlx.Tx) error {
 	return nil
 }
 
-func (e *nodeEntity) checkExists(tx *sqlx.Tx) (bool, error) {
+func (e *executor) checkNodeExists(n ast.Entity, tx *sqlx.Tx) (bool, error) {
 	args := []any{}
 	query := strings.Builder{}
 	query.WriteString("select n.id from nodes n\n")
 
-	if val, ok := e.node.Attribute("id"); ok {
+	if val, ok := n.Attribute("id"); ok {
 		query.WriteString("where n.id = ?")
 		args = append(args, val)
 	} else {
 		i := 0
-		for _, v := range e.node.Attributes() {
+		for _, v := range n.Attributes() {
 			query.WriteString(fmt.Sprintf(`
 				inner join (select * from node_attributes where attr_name = ? and attr_value = ?) na%d
 				on n.id = na%d.node_id
@@ -275,7 +216,7 @@ func (e *nodeEntity) checkExists(tx *sqlx.Tx) (bool, error) {
 			args = append(args, v.Value)
 			i++
 		}
-		for _, l := range e.node.Labels() {
+		for _, l := range n.Labels() {
 			query.WriteString(fmt.Sprintf(`
 				inner join (select * from node_labels where label = ?) nl%d
 				on n.id = nl%d.node_id
@@ -299,56 +240,27 @@ func (e *nodeEntity) checkExists(tx *sqlx.Tx) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("generating id: %w", err)
 		}
-		e.node.WithID(ast.EntityID(id))
-	} else {
-		e.node.WithID(ast.EntityID(id))
 	}
+
+	n.WithID(ast.EntityID(id))
 
 	return !isNew, nil
 }
 
-func (e *nodeEntity) ID() ast.EntityID {
-	return e.node.ID()
-}
-
-func (e *nodeEntity) WithID(id ast.EntityID) ast.Entity {
-	return e.node.WithID(id)
-}
-
-func (e *nodeEntity) Type() ast.EntityType {
-	return ast.EntityTypeNode
-}
-
-func (e *nodeEntity) Identifier() string {
-	return e.node.Identifier()
-}
-
-func (e *nodeEntity) Labels() []string {
-	return e.node.Labels()
-}
-
-func (e *nodeEntity) Attributes() map[string]ast.Attribute {
-	return e.node.Attributes()
-}
-
-func (e *nodeEntity) Attribute(k string) (any, bool) {
-	return e.node.Attribute(k)
-}
-
-func (e *relationEntity) finalise(tx *sqlx.Tx) (ast.Entity, error) {
-	_, err := e.left.finalise(tx)
+func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) error {
+	err := e.finaliseNode(r.Left(), tx)
 	if err != nil {
-		return nil, fmt.Errorf("finalising left node: %w", err)
+		return fmt.Errorf("finalising left node: %w", err)
 	}
 
-	_, err = e.right.finalise(tx)
+	err = e.finaliseNode(r.Right(), tx)
 	if err != nil {
-		return nil, fmt.Errorf("finalising right node: %w", err)
+		return fmt.Errorf("finalising right node: %w", err)
 	}
 
-	_, err = e.checkExists(tx)
+	_, err = e.checkRelationExists(r, tx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	now := time.Now().UTC()
@@ -359,35 +271,35 @@ func (e *relationEntity) finalise(tx *sqlx.Tx) (ast.Entity, error) {
 		updated_at = ?,
 		left_node_id = ?,
 		right_node_id = ?,
-		direction = ?`, e.ID(), now, e.left.ID(), e.right.ID(), e.relation.Direction(), now, e.left.ID(), e.right.ID(), e.relation.Direction())
+		direction = ?`, r.ID(), now, r.Left().ID(), r.Right().ID(), r.Direction(), now, r.Left().ID(), r.Right().ID(), r.Direction())
 	if err != nil {
-		return nil, fmt.Errorf("upserting relation: %w", err)
+		return fmt.Errorf("upserting relation: %w", err)
 	}
 
-	err = e.finaliseLabels(tx)
+	err = e.finaliseRelationLabels(r, tx)
 	if err != nil {
-		return nil, fmt.Errorf("finalising labels: %w", err)
+		return fmt.Errorf("finalising labels: %w", err)
 	}
 
-	err = e.finaliseAttributes(tx)
+	err = e.finaliseRelationAttributes(r, tx)
 	if err != nil {
-		return nil, fmt.Errorf("finalising attrs: %w", err)
+		return fmt.Errorf("finalising attrs: %w", err)
 	}
 
-	return e, nil
+	return nil
 }
 
-func (e *relationEntity) checkExists(tx *sqlx.Tx) (bool, error) {
+func (e *executor) checkRelationExists(r ast.Relation, tx *sqlx.Tx) (bool, error) {
 	args := []any{}
 	query := strings.Builder{}
 	query.WriteString("select r.id from relations r\n")
 
-	if val, ok := e.relation.Attribute("id"); ok {
+	if val, ok := r.Attribute("id"); ok {
 		query.WriteString("where r.id = ?")
 		args = append(args, val)
 	} else {
 		i := 0
-		for _, v := range e.relation.Attributes() {
+		for _, v := range r.Attributes() {
 			query.WriteString(fmt.Sprintf(`
 				inner join (select * from relation_attributes where attr_name = ? and attr_value = ?) ra%d
 				on r.id = ra%d.relation_id
@@ -396,7 +308,7 @@ func (e *relationEntity) checkExists(tx *sqlx.Tx) (bool, error) {
 			args = append(args, v.Value)
 			i++
 		}
-		for _, l := range e.relation.Labels() {
+		for _, l := range r.Labels() {
 			query.WriteString(fmt.Sprintf(`
 				inner join (select * from relation_labels where label = ?) rl%d
 				on r.id = rl%d.relation_id`, i, i))
@@ -415,25 +327,23 @@ func (e *relationEntity) checkExists(tx *sqlx.Tx) (bool, error) {
 			return false, fmt.Errorf("checking existing: %w", err)
 		}
 		isNew = true
-		id, err := gonanoid.New()
+		id, err = gonanoid.New()
 		if err != nil {
 			return false, fmt.Errorf("generating id: %w", err)
 		}
-		e.relation.WithID(ast.EntityID(id))
-	} else {
-		e.relation.WithID(ast.EntityID(id))
 	}
+	r.WithID(ast.EntityID(id))
 
 	return !isNew, nil
 }
 
-func (e *relationEntity) finaliseLabels(tx *sqlx.Tx) error {
-	if len(e.relation.Labels()) == 0 {
+func (e *executor) finaliseRelationLabels(r ast.Relation, tx *sqlx.Tx) error {
+	if len(r.Labels()) == 0 {
 		return nil
 	}
 
 	labels := map[string]string{}
-	rows, err := tx.Queryx("select id, label from relation_labels where relation_id = ?", e.ID())
+	rows, err := tx.Queryx("select id, label from relation_labels where relation_id = ?", r.ID())
 	if err != nil {
 		return fmt.Errorf("querying labels: %w", err)
 	}
@@ -451,7 +361,7 @@ func (e *relationEntity) finaliseLabels(tx *sqlx.Tx) error {
 	}
 
 	now := time.Now().UTC()
-	for _, l := range e.relation.Labels() {
+	for _, l := range r.Labels() {
 		id := ""
 		if lid, ok := labels[l]; ok {
 			id = lid
@@ -464,7 +374,7 @@ func (e *relationEntity) finaliseLabels(tx *sqlx.Tx) error {
 		_, err = tx.Exec(`
 			insert into relation_labels(id, created_at, relation_id, label)
 			values(?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?`, id, now, e.ID(), l, now)
+			on conflict(id) do update set updated_at = ?`, id, now, r.ID(), l, now)
 		if err != nil {
 			return fmt.Errorf("inserting label: %w", err)
 		}
@@ -481,13 +391,13 @@ func (e *relationEntity) finaliseLabels(tx *sqlx.Tx) error {
 	return nil
 }
 
-func (e *relationEntity) finaliseAttributes(tx *sqlx.Tx) error {
-	if len(e.relation.Attributes()) == 0 {
+func (e *executor) finaliseRelationAttributes(r ast.Relation, tx *sqlx.Tx) error {
+	if len(r.Attributes()) == 0 {
 		return nil
 	}
 
 	attrs := map[string]string{}
-	rows, err := tx.Queryx("select id, attr_name from relation_attributes where relation_id = ?", e.ID())
+	rows, err := tx.Queryx("select id, attr_name from relation_attributes where relation_id = ?", r.ID())
 	if err != nil {
 		return fmt.Errorf("querying attrs: %w", err)
 	}
@@ -505,7 +415,7 @@ func (e *relationEntity) finaliseAttributes(tx *sqlx.Tx) error {
 	}
 
 	now := time.Now().UTC()
-	for _, a := range e.relation.Attributes() {
+	for _, a := range r.Attributes() {
 		id := ""
 		if l, ok := attrs[a.Key()]; ok {
 			id = l
@@ -518,7 +428,7 @@ func (e *relationEntity) finaliseAttributes(tx *sqlx.Tx) error {
 		_, err = tx.Exec(`
 			insert into relation_attributes(id, created_at, relation_id, attr_name, attr_value, data_type)
 			values(?, ?, ?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, e.ID(), a.Key, a.Value, a.Type, now, a.Value)
+			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, r.ID(), a.Key, a.Value, a.Type, now, a.Value)
 		if err != nil {
 			return fmt.Errorf("inserting attr: %w", err)
 		}
@@ -535,91 +445,17 @@ func (e *relationEntity) finaliseAttributes(tx *sqlx.Tx) error {
 	return nil
 }
 
-func (e *relationEntity) ID() ast.EntityID {
-	return e.relation.ID()
-}
-
-func (e *relationEntity) WithID(id ast.EntityID) ast.Entity {
-	return e.relation.WithID(id)
-}
-
-func (e *relationEntity) Type() ast.EntityType {
-	return e.relation.Type()
-}
-
-func (e *relationEntity) Identifier() string {
-	return e.relation.Identifier()
-}
-
-func (e *relationEntity) Labels() []string {
-	return e.relation.Labels()
-}
-
-func (e *relationEntity) Attribute(k string) (any, bool) {
-	return e.relation.Attribute(k)
-}
-
-func (e *relationEntity) Attributes() map[string]ast.Attribute {
-	return e.relation.Attributes()
-}
-
-func (m *mergeCmd) finalise(tx *sqlx.Tx) (ast.Entity, error) {
-	if len(m.items) == 1 {
-		return m.items[0].finalise(tx)
-	}
-
-	if _, ok := m.items[0].(*nodeEntity); !ok {
-		return nil, errors.New("expected node")
-	}
-
-	if _, ok := m.items[2].(*nodeEntity); !ok {
-		return nil, errors.New("expected node")
-	}
-
-	var rel *relationEntity
-	var ok bool
-	if rel, ok = m.items[1].(*relationEntity); !ok {
-		return nil, errors.New("expected relation")
-	}
-
-	rel.left = m.items[0].(*nodeEntity)
-	rel.right = m.items[2].(*nodeEntity)
-	res, err := rel.finalise(tx)
-	if err != nil {
-		return nil, fmt.Errorf("finalising relation: %w", err)
-	}
-
-	return res, nil
-}
-
-func (m *mergeCmd) accept(e *executor) error {
-	for {
-		i := e.pop()
-		if i == nil {
-			if !(len(m.items) == 1 || len(m.items) == 3) {
-				return fmt.Errorf("unexpected number of entities: %d", len(m.items))
-			}
-			return nil
-		}
-		switch i.Type() {
-		case ast.EntityTypeNode:
-			m.items = append(m.items, &nodeEntity{
-				node: i,
-			})
-		case ast.EntityTypeRelation:
-			m.items = append(m.items, &relationEntity{
-				relation: i.(ast.Relation),
-			})
-		default:
-			return fmt.Errorf("unexpected entity: %v", i)
-		}
+func (e *executor) finaliseMergeCmd(mergeCmd ast.Command, tx *sqlx.Tx) (ast.Entity, error) {
+	switch mergeCmd.Entity().Type() {
+	case ast.EntityTypeNode:
+		return mergeCmd.Entity(), e.finaliseNode(mergeCmd.Entity(), tx)
+	case ast.EntityTypeRelation:
+		return mergeCmd.Entity(), e.finaliseRelation(mergeCmd.Entity().(ast.Relation), tx)
+	default:
+		return nil, fmt.Errorf("unknown entity: %v", mergeCmd.Entity())
 	}
 }
 
-func (m *matchCmd) finalise(tx *sqlx.Tx) (ast.Entity, error) {
+func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (ast.Entity, error) {
 	return nil, nil
-}
-
-func (m *matchCmd) accept(e *executor) error {
-	return nil
 }

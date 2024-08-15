@@ -37,12 +37,30 @@ func TestExecutor(t *testing.T) {
 	err = p.Run()
 	assert.NoError(err)
 
-	e, err := New(p.Entities(), store, logger)
-	assert.NotNil(e)
-	assert.NoError(err)
+	ents := p.Entities()
+	ids := make([]ast.EntityID, 0, len(ents))
+	for _, ent := range ents {
+		e, err := New(ent, store, logger)
+		assert.NotNil(e)
+		assert.NoError(err)
 
-	ent, err := e.Execute()
-	assert.NoError(err)
-	assert.NotNil(ent)
+		ent, err := e.Execute()
+		assert.NoError(err)
+		assert.NotNil(ent)
+
+		ids = append(ids, ent.ID())
+	}
+
+	// make sure previous insert found
+	for i, ent := range ents {
+		e, err := New(ent, store, logger)
+		assert.NotNil(e)
+		assert.NoError(err)
+
+		ent, err := e.Execute()
+		assert.NoError(err)
+		assert.NotNil(ent)
+		assert.Equal(ids[i], ent.ID())
+	}
 
 }
