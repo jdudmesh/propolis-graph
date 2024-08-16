@@ -19,6 +19,7 @@ package ast
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 var (
@@ -62,12 +63,21 @@ type parseable interface {
 	parse(p *parser) error
 }
 
-type mergeCmd struct {
+type entityClause struct {
 	entity Entity
 }
 
+type mergeCmd struct {
+	entityClause
+}
+
 type matchCmd struct {
-	entity Entity
+	entityClause
+	since *sinceClause
+}
+
+type sinceClause struct {
+	value time.Time
 }
 
 type EntityID string
@@ -174,11 +184,16 @@ func (e *entity) parseAttr(p *parser) error {
 	}
 }
 
-func (m *mergeCmd) parse(p *parser) error {
+func (c *entityClause) parse(p *parser) error {
 	p.accept()
 	for {
 		i := p.pop()
 		switch i.typ {
+		case itemWhere:
+			fallthrough
+		case itemSince:
+			p.back()
+			return nil
 		case itemEOF:
 			return nil
 		case itemNodeStart:
@@ -186,11 +201,11 @@ func (m *mergeCmd) parse(p *parser) error {
 			if err != nil {
 				return err
 			}
-			if m.entity == nil {
-				m.entity = n
+			if c.entity == nil {
+				c.entity = n
 				continue
 			}
-			if r, ok := m.entity.(*relation); !ok {
+			if r, ok := c.entity.(*relation); !ok {
 				return fmt.Errorf("unexpected entity: %v", n)
 			} else {
 				r.right = n
@@ -202,10 +217,10 @@ func (m *mergeCmd) parse(p *parser) error {
 			if err != nil {
 				return err
 			}
-			if n, ok := m.entity.(*node); !ok {
+			if n, ok := c.entity.(*node); !ok {
 				return fmt.Errorf("unexpected entity: %v", n)
 			} else {
-				m.entity = r
+				c.entity = r
 				r.left = n
 			}
 		default:
@@ -232,29 +247,6 @@ func (m *mergeCmd) Attributes() map[string]Attribute {
 
 func (m *mergeCmd) Attribute(k string) (string, bool) {
 	return "", false
-}
-
-func (m *matchCmd) parse(p *parser) error {
-	p.accept()
-	for {
-		i := p.pop()
-		switch i.typ {
-		case itemEOF:
-			return nil
-		case itemNodeStart:
-			n, err := p.node()
-			if err != nil {
-				return err
-			}
-			// TODO: for now we will only allow matches on single nodes
-			if m.entity != nil {
-				return fmt.Errorf("unexpected entity: %v", n)
-			}
-			m.entity = n
-		default:
-			return fmt.Errorf("unexpected item: %v", i)
-		}
-	}
 }
 
 func (m *matchCmd) Type() EntityType {
@@ -375,6 +367,9 @@ func (r *relation) parseInner(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
+		case itemRelationIdentifier:
+			r.identifier = i.val
+			p.accept()
 		case itemRelationLabelStart:
 			p.accept()
 		case itemRelationLabel:
@@ -415,4 +410,8 @@ func (c mergeCmd) Entity() Entity {
 
 func (c matchCmd) Entity() Entity {
 	return c.entity
+}
+
+func (s *sinceClause) parse(p *parser) error {
+	return nil
 }

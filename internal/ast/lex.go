@@ -29,6 +29,7 @@ language spec: https://opencypher.org/ https://s3.amazonaws.com/artifacts.opency
 */
 
 const (
+	alpha        = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 	alphanumeric = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 	numeric      = "0123456789.E"
 	spaces       = " \t\n"
@@ -75,9 +76,13 @@ const (
 	itemMerge
 	itemCreate
 	itemDelete
+	itemWhere
+	itemSince
 	itemSet
 	itemSubscribe
 	itemUnsubscribe
+	itemOr
+	itemAnd
 )
 
 // item represents a token or text string returned from the scanner.
@@ -92,9 +97,13 @@ var keywords = map[string]itemType{
 	"merge":       itemMerge,
 	"create":      itemCreate,
 	"delete":      itemDelete,
+	"where":       itemWhere,
+	"since":       itemSince,
 	"set":         itemSet,
 	"subscribe":   itemSubscribe,
 	"unsubscribe": itemUnsubscribe,
+	"or":          itemOr,
+	"and":         itemAnd,
 }
 
 const eof = -1
@@ -272,14 +281,6 @@ func lexClause(l *lexer) stateFn {
 
 	n := l.peek()
 	switch {
-	case strings.ContainsRune(alphanumeric, n):
-		l.acceptRun(alphanumeric)
-		i := l.thisItem(itemKeyword)
-		if t, ok := keywords[strings.ToLower(i.val)]; ok {
-			i.typ = t
-			l.emitItem(i)
-			return lexClause
-		}
 	case n == '(':
 		return lexNodeStart
 	case n == ')':
@@ -294,10 +295,47 @@ func lexClause(l *lexer) stateFn {
 		return lexRelationStart
 	case n == ']':
 		return lexRelationEnd
+	default:
+		l.acceptRun(spaces)
+		l.ignore()
+		if strings.ContainsRune(alpha, n) {
+			return lexKeyword
+		}
+		if strings.ContainsRune(numeric, n) {
+			return lexValue
+		}
+		if strings.ContainsRune(quotes, n) {
+			return lexQuoted
+		}
 	}
 
 	l.errorf("syntax error: %s (%d)", l.input[l.start:l.pos], l.pos)
 	return nil
+}
+
+func lexKeyword(l *lexer) stateFn {
+	l.acceptRun(alphanumeric)
+	i := l.thisItem(itemKeyword)
+	kw := strings.ToLower(strings.TrimSpace(i.val))
+	if t, ok := keywords[kw]; ok {
+		i.typ = t
+		l.emitItem(i)
+		return lexClause
+	}
+	l.errorf("unknow keyword: %s (%d)", i.val, l.pos)
+	return nil
+}
+
+func lexValue(l *lexer) stateFn {
+	l.acceptRun(numeric)
+	l.emitItem(l.thisItem(itemNumber))
+	return lexClause
+}
+
+func lexQuoted(l *lexer) stateFn {
+	l.acceptQuotedRun(numeric)
+	l.emitItem(l.thisItem(itemText))
+	return lexClause
 }
 
 func lexNodeStart(l *lexer) stateFn {
@@ -529,8 +567,6 @@ func lexRelationInner(l *lexer) stateFn {
 
 	n := l.peek()
 	switch {
-	case strings.ContainsRune(alphanumeric, n):
-		return lexRelationIdentifier
 	case n == ':':
 		return lexRelationLabelStart
 	case n == '{':
@@ -539,6 +575,10 @@ func lexRelationInner(l *lexer) stateFn {
 		return lexRelationAttribEnd
 	case n == ']':
 		return lexRelationEnd
+	default:
+		if strings.ContainsRune(alphanumeric, n) {
+			return lexRelationIdentifier
+		}
 	}
 
 	return nil
@@ -550,7 +590,7 @@ func lexRelationIdentifier(l *lexer) stateFn {
 	i := l.thisItem(itemRelationIdentifier)
 	l.emitItem(i)
 
-	return lexNodeInner
+	return lexRelationInner
 }
 
 func lexRelationLabelStart(l *lexer) stateFn {

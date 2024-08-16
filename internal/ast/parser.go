@@ -16,26 +16,25 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
 package ast
 
+import (
+	"fmt"
+)
+
 type parser struct {
-	items    []item
-	start    int
-	pos      int
-	entities []parseable
+	items []item
+	start int
+	pos   int
+	cmd   Command
 }
 
 func Parse(l *lexer) *parser {
 	return &parser{
-		items:    l.items,
-		entities: []parseable{},
+		items: l.items,
 	}
 }
 
-func (p *parser) Entities() []Entity {
-	ents := make([]Entity, len(p.entities))
-	for i, v := range p.entities {
-		ents[i] = v
-	}
-	return ents
+func (p *parser) Command() Command {
+	return p.cmd
 }
 
 func (p *parser) Run() error {
@@ -47,27 +46,26 @@ func (p *parser) Run() error {
 			if err != nil {
 				return err
 			}
-			p.add(cmd)
+			p.cmd = cmd
 		case itemMatch:
 			cmd, err := p.match()
 			if err != nil {
 				return err
 			}
-			p.add(cmd)
-		case itemNodeStart:
-			n, err := p.node()
-			if err != nil {
-				return err
+			p.cmd = cmd
+		case itemSince:
+			if p.cmd == nil {
+				return fmt.Errorf("unexpected token: %s", i.val)
 			}
-			p.add(n)
-		case itemRelationDirNeutral:
-			fallthrough
-		case itemRelationDirLeft:
-			r, err := p.relation()
-			if err != nil {
-				return err
+			if m, ok := p.cmd.(*matchCmd); !ok {
+				return fmt.Errorf("syntax error: since not acceptable")
+			} else {
+				s, err := p.since()
+				if err != nil {
+					return err
+				}
+				m.since = s
 			}
-			p.add(r)
 		case itemEOF:
 			return nil
 		}
@@ -85,14 +83,14 @@ func (p *parser) pop() item {
 	return i
 }
 
+func (p *parser) back() {
+	p.pos--
+}
+
 func (p *parser) accept() []item {
 	res := p.items[p.start:p.pos]
 	p.start = p.pos
 	return res
-}
-
-func (p *parser) add(n parseable) {
-	p.entities = append(p.entities, n)
 }
 
 func (p *parser) merge() (*mergeCmd, error) {
@@ -144,4 +142,14 @@ func (p *parser) relation() (*relation, error) {
 	}
 
 	return r, nil
+}
+
+func (p *parser) since() (*sinceClause, error) {
+	s := &sinceClause{}
+	err := s.parse(p)
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
 }

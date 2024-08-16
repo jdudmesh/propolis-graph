@@ -39,12 +39,12 @@ type store interface {
 }
 
 type executor struct {
-	stmt   ast.Entity
+	stmt   any
 	store  store
 	logger *slog.Logger
 }
 
-func New(stmt ast.Entity, s store, logger *slog.Logger) (*executor, error) {
+func New(stmt any, s store, logger *slog.Logger) (*executor, error) {
 	return &executor{
 		stmt:   stmt,
 		logger: logger,
@@ -66,11 +66,17 @@ func (e *executor) Execute() (any, error) {
 	}
 
 	var res any
-	switch e.stmt.Type() {
-	case ast.EntityTypeMergeCmd:
-		res, err = e.finaliseMergeCmd(e.stmt.(ast.Command), tx)
-	case ast.EntityTypeMatchCmd:
-		res, err = e.finaliseMatchCmd(e.stmt.(ast.Command), tx)
+	if cmd, ok := e.stmt.(ast.Command); ok {
+		switch cmd.Entity().Type() {
+		case ast.EntityTypeMergeCmd:
+			res, err = e.finaliseMergeCmd(cmd, tx)
+		case ast.EntityTypeMatchCmd:
+			res, err = e.finaliseMatchCmd(cmd, tx)
+		default:
+			return nil, fmt.Errorf("unkown command: %v", cmd)
+		}
+	} else {
+		return nil, fmt.Errorf("unexpected entity: %v", e.stmt)
 	}
 
 	if err != nil {
@@ -463,9 +469,10 @@ func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (any, error) {
 }
 
 func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (*Node, error) {
+	// TODO - at the moment we only support finding a single node.
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
-		return e.queryNodes(cmd.Entity(), tx)
+		return e.findNode(cmd.Entity(), tx)
 	default:
 		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
 	}
@@ -587,6 +594,6 @@ func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
 	return res, nil
 }
 
-func (e *executor) queryNodes(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
+func (e *executor) queryNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 	return nil, nil
 }

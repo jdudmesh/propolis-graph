@@ -28,6 +28,7 @@ type Node struct {
 	UpdatedAt  *time.Time       `db:"updated_at"`
 	labels     []*NodeLabel     `db:"-"`
 	attributes []*NodeAttribute `db:"-"`
+	Relations  []*Relation      `db:"-"`
 }
 
 type NodeAttribute struct {

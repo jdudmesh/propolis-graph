@@ -26,9 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestExecutor(t *testing.T) {
-	assert := assert.New(t)
-
+func setup(t *testing.T) (store, *slog.Logger) {
 	opts := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}
@@ -38,60 +36,74 @@ func TestExecutor(t *testing.T) {
 	dbConn := "file::memory:?cache=shared"
 	//dbConn := fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cur)
 	store, err := datastore.NewInternalState(dbConn, cur+"/migrations", []string{}, []string{})
-	assert.NoError(err)
+	assert.NoError(t, err)
 	if store == nil {
 		t.Fatal("no store")
 	}
+	return store, logger
+}
 
-	t.Run("create and update", func(t *testing.T) {
-		testStmt := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
+func TestExecutorCRUD(t *testing.T) {
+	assert := assert.New(t)
+	store, logger := setup(t)
 
-		l := ast.Lex("test", testStmt)
-		l.Run()
+	testStmt := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
 
-		p := ast.Parse(l)
-		err = p.Run()
+	l := ast.Lex("test", testStmt)
+	l.Run()
+
+	p := ast.Parse(l)
+	err := p.Run()
+	assert.NoError(err)
+
+	ids := []string{}
+	t.Run("create", func(t *testing.T) {
+		e, err := New(p.Command(), store, logger)
+		assert.NotNil(e)
 		assert.NoError(err)
 
-		ents := p.Entities()
-		ids := make([]string, 0, len(ents))
-		for _, ent := range ents {
-			e, err := New(ent, store, logger)
-			assert.NotNil(e)
-			assert.NoError(err)
-
-			res, err := e.Execute()
-			assert.NoError(err)
-			assert.NotNil(ent)
-			assert.IsType(&Relation{}, res)
-			ids = append(ids, res.(*Relation).ID)
-		}
-
-		// make sure previous insert found
-		for i, ent := range ents {
-			e, err := New(ent, store, logger)
-			assert.NotNil(e)
-			assert.NoError(err)
-
-			res, err := e.Execute()
-			assert.NoError(err)
-			assert.NotNil(res)
-			assert.IsType(&Relation{}, res)
-			assert.Equal(ids[i], res.(*Relation).ID)
-		}
+		res, err := e.Execute()
+		assert.NoError(err)
+		assert.NotNil(p.Command())
+		assert.IsType(&Relation{}, res)
+		ids = append(ids, res.(*Relation).ID)
+		ids = append(ids, res.(*Relation).LeftNodeID)
+		ids = append(ids, res.(*Relation).RightNodeID)
 	})
 
+	t.Run("update", func(t *testing.T) {
+		// make sure previous insert found
+		e, err := New(p.Command(), store, logger)
+		assert.NotNil(e)
+		assert.NoError(err)
+
+		res, err := e.Execute()
+		assert.NoError(err)
+		assert.NotNil(res)
+		assert.IsType(&Relation{}, res)
+		assert.Equal(ids[0], res.(*Relation).ID)
+		assert.Equal(ids[1], res.(*Relation).LeftNodeID)
+		assert.Equal(ids[2], res.(*Relation).RightNodeID)
+	})
+
+}
+
+func TestExecutorQuery(t *testing.T) {
+	assert := assert.New(t)
+	store, logger := setup(t)
+
+	testStmt := `MATCH (i:Identity:Person {name: 'john'})-[r]-(c) SINCE '2024-08-16T08:13:19.115728+00:00'`
+
 	t.Run("find", func(t *testing.T) {
-		testStmt := `MATCH (i:Identity:Person {name: 'john'})`
 		l := ast.Lex("test", testStmt)
 		l.Run()
 
 		p := ast.Parse(l)
-		err = p.Run()
+		err := p.Run()
 		assert.NoError(err)
-		assert.NotZero(len(p.Entities()))
+		assert.NotNil(p.Command())
 
-		e, err := New(p.Entities()[0], store, logger)
+		e, err := New(p.Command(), store, logger)
 		assert.NotNil(e)
 		assert.NoError(err)
 
