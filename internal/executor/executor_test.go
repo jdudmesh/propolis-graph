@@ -17,9 +17,11 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package executor
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jdudmesh/propolis/internal/ast"
 	"github.com/jdudmesh/propolis/internal/datastore"
@@ -49,11 +51,7 @@ func TestExecutorCRUD(t *testing.T) {
 
 	testStmt := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
 
-	l := ast.Lex("test", testStmt)
-	l.Run()
-
-	p := ast.Parse(l)
-	err := p.Run()
+	p, err := ast.Parse(testStmt)
 	assert.NoError(err)
 
 	ids := []string{}
@@ -92,14 +90,23 @@ func TestExecutorQuery(t *testing.T) {
 	assert := assert.New(t)
 	store, logger := setup(t)
 
-	testStmt := `MATCH (i:Identity:Person {name: 'john'})-[r]-(c) SINCE '2024-08-16T08:13:19.115728+00:00'`
+	testStmt1 := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
+
+	p, err := ast.Parse(testStmt1)
+	assert.NoError(err)
+
+	e, err := New(p.Command(), store, logger)
+	assert.NotNil(e)
+	assert.NoError(err)
+
+	_, err = e.Execute()
+	assert.NoError(err)
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	testStmt2 := fmt.Sprintf("MATCH (i:Identity:Person {name: 'john'})-[r]-(c) SINCE '%s'", now)
 
 	t.Run("find", func(t *testing.T) {
-		l := ast.Lex("test", testStmt)
-		l.Run()
-
-		p := ast.Parse(l)
-		err := p.Run()
+		p, err := ast.Parse(testStmt2)
 		assert.NoError(err)
 		assert.NotNil(p.Command())
 

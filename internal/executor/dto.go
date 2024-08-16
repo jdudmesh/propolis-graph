@@ -80,43 +80,4 @@ type RelationLabel struct {
 	Label      string     `db:"label"`
 }
 
-// func (n *Node) ID() string {
-// 	return n.ID
-// }
-
-// func (n *Node) WithID(EntityID) ast.Entity {
-// 	return nil
-// }
-
-// func (n *Node) Type() ast.EntityType {
-// 	return n.Type
-// }
-
-// func (n *Node) Identifier() string {
-// 	return n.Identifier
-// }
-
-// func (n *Node) Labels() []string {
-// 	labels := make([]string, len(n.labels))
-// 	for i, x := range n.labels {
-// 		labels[i] = x
-// 	}
-// 	return labels
-// }
-
-// func (n *Node) Attributes() map[string]ast.Attribute {
-// 	attrs := make(map[string]ast.Attribute)
-// 	for _, v := range n.attributes {
-// 		attrs[v.Name] = v
-// 	}
-// 	return attrs
-// }
-
-// func (n *Node) Attribute(key string) (any, bool) {
-// 	for _, v := range n.attributes {
-// 		if v.Name == key {
-// 			return v.Value, true
-// 		}
-// 	}
-// 	return nil, false
-// }
+type SearchResults map[string]any

@@ -21,64 +21,63 @@ import (
 )
 
 type parser struct {
-	items []item
+	lexer *lexer
 	start int
 	pos   int
 	cmd   Command
 }
 
-func Parse(l *lexer) *parser {
-	return &parser{
-		items: l.items,
+func Parse(stmt string) (*parser, error) {
+	p := &parser{
+		lexer: lex(stmt),
 	}
-}
 
-func (p *parser) Command() Command {
-	return p.cmd
-}
-
-func (p *parser) Run() error {
 	for {
 		i := p.pop()
 		switch i.typ {
 		case itemMerge:
 			cmd, err := p.merge()
 			if err != nil {
-				return err
+				return nil, err
 			}
 			p.cmd = cmd
 		case itemMatch:
 			cmd, err := p.match()
 			if err != nil {
-				return err
+				return nil, err
 			}
 			p.cmd = cmd
 		case itemSince:
 			if p.cmd == nil {
-				return fmt.Errorf("unexpected token: %s", i.val)
+				return nil, fmt.Errorf("unexpected token: %s", i.val)
 			}
 			if m, ok := p.cmd.(*matchCmd); !ok {
-				return fmt.Errorf("syntax error: since not acceptable")
+				return nil, fmt.Errorf("syntax error: since not acceptable")
 			} else {
 				s, err := p.since()
 				if err != nil {
-					return err
+					return nil, err
 				}
 				m.since = s
 			}
 		case itemEOF:
-			return nil
+			return p, nil
 		}
 	}
+
+}
+
+func (p *parser) Command() Command {
+	return p.cmd
 }
 
 func (p *parser) pop() item {
-	if p.pos >= len(p.items) {
+	if p.pos >= len(p.lexer.items) {
 		return item{
 			typ: itemEOF,
 		}
 	}
-	i := p.items[p.pos]
+	i := p.lexer.items[p.pos]
 	p.pos++
 	return i
 }
@@ -88,7 +87,7 @@ func (p *parser) back() {
 }
 
 func (p *parser) accept() []item {
-	res := p.items[p.start:p.pos]
+	res := p.lexer.items[p.start:p.pos]
 	p.start = p.pos
 	return res
 }

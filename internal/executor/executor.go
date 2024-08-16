@@ -67,13 +67,13 @@ func (e *executor) Execute() (any, error) {
 
 	var res any
 	if cmd, ok := e.stmt.(ast.Command); ok {
-		switch cmd.Entity().Type() {
+		switch cmd.Type() {
 		case ast.EntityTypeMergeCmd:
 			res, err = e.finaliseMergeCmd(cmd, tx)
 		case ast.EntityTypeMatchCmd:
 			res, err = e.finaliseMatchCmd(cmd, tx)
 		default:
-			return nil, fmt.Errorf("unkown command: %v", cmd)
+			return nil, fmt.Errorf("unknown command: %v", cmd)
 		}
 	} else {
 		return nil, fmt.Errorf("unexpected entity: %v", e.stmt)
@@ -278,7 +278,7 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, err
 		return nil, fmt.Errorf("finalising right node: %w", err)
 	}
 
-	rel, err := e.findRelation(r, tx)
+	rel, err := e.findRelation(r, left.ID, right.ID, tx)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -468,11 +468,20 @@ func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (any, error) {
 	}
 }
 
-func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (*Node, error) {
-	// TODO - at the moment we only support finding a single node.
+func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (SearchResults, error) {
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
-		return e.findNode(cmd.Entity(), tx)
+		node, err := e.findNode(cmd.Entity(), tx)
+		if err != nil {
+			return nil, err
+		}
+		ident := cmd.Entity().Identifier()
+		if ident == "" {
+			ident = "_"
+		}
+		return SearchResults{ident: node}, nil
+	case ast.EntityTypeRelation:
+		return e.searchNodes(cmd.Entity().(ast.Relation), cmd.Since(), tx)
 	default:
 		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
 	}
@@ -537,7 +546,7 @@ func (e *executor) findNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 	return res, nil
 }
 
-func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
+func (e *executor) findRelation(r ast.Relation, leftNodeId, rightNodeId string, tx *sqlx.Tx) (*Relation, error) {
 	args := []any{}
 	query := strings.Builder{}
 	query.WriteString("select r.* from relations r\n")
@@ -563,6 +572,9 @@ func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
 			args = append(args, l)
 			i++
 		}
+
+		query.WriteString("\nwhere left_node_id = ? and right_node_id = ?")
+		args = append(args, leftNodeId, rightNodeId)
 	}
 
 	// TODO: check only one matching row
@@ -594,6 +606,108 @@ func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
 	return res, nil
 }
 
-func (e *executor) queryNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
-	return nil, nil
+func (e *executor) searchNodes(r ast.Relation, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
+	res := make(SearchResults)
+
+	// left hand node must exist
+	node, err := e.findNode(r.Left(), tx)
+	if err != nil {
+		return nil, fmt.Errorf("left node: %w", err)
+	}
+
+	ident := r.Left().Identifier()
+	if ident != "" {
+		res[ident] = node
+	}
+
+	rels, err := e.searchRelation(r, node.ID, "", tx)
+	if err != nil {
+		return nil, fmt.Errorf("left node: %w", err)
+	}
+	ident = r.Identifier()
+	if ident != "" {
+		res[ident] = rels
+	}
+
+	return res, nil
+}
+
+func (e *executor) searchRelation(r ast.Relation, leftNodeId, rightNodeId string, tx *sqlx.Tx) ([]*Relation, error) {
+	results := []*Relation{}
+
+	args := []any{}
+	query := strings.Builder{}
+	query.WriteString("select r.* from relations r\n")
+
+	if val, ok := r.Attribute("id"); ok {
+		query.WriteString("where r.id = ?")
+		args = append(args, val)
+	} else {
+		i := 0
+		for _, v := range r.Attributes() {
+			query.WriteString(fmt.Sprintf(`
+				inner join (select * from relation_attributes where attr_name = ? and attr_value = ?) ra%d
+				on r.id = ra%d.relation_id
+			`, i, i))
+			args = append(args, v.Key())
+			args = append(args, v.Value())
+			i++
+		}
+		for _, l := range r.Labels() {
+			query.WriteString(fmt.Sprintf(`
+				inner join (select * from relation_labels where label = ?) rl%d
+				on r.id = rl%d.relation_id`, i, i))
+			args = append(args, l)
+			i++
+		}
+
+		ands := []string{}
+		if leftNodeId != "" {
+			ands = append(ands, "left_node_id = ?")
+			args = append(args, leftNodeId)
+		}
+		if rightNodeId != "" {
+			ands = append(ands, "right_node_id = ?")
+			args = append(args, rightNodeId)
+		}
+		if len(ands) > 0 {
+			query.WriteString("\nwhere ")
+			query.WriteString(strings.Join(ands, " and "))
+		}
+	}
+
+	rows, err := tx.Queryx(query.String(), args...)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("searching relations: %w", err)
+		}
+		return results, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		r := &Relation{}
+		err = rows.StructScan(r)
+		if err != nil {
+			return nil, fmt.Errorf("scanning row: %w", err)
+		}
+		r.attributes = []*RelationAttribute{}
+		err = tx.Select(&r.attributes, "select * from relation_attributes where relation_id = ?", r.ID)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("fetching relation: %w", err)
+			}
+		}
+
+		r.labels = []*RelationLabel{}
+		err = tx.Select(&r.labels, "select * from relation_labels where relation_id = ?", r.ID)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("fetching relation: %w", err)
+			}
+		}
+
+		results = append(results, r)
+	}
+
+	return results, nil
 }

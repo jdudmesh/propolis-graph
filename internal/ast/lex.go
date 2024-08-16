@@ -131,7 +131,6 @@ const (
 
 // lexer holds the state of the scanner.
 type lexer struct {
-	name  string // the name of the input; used only for error reports
 	input string // the string being scanned
 	pos   int    // current position in the input
 	start int    // start position of this item
@@ -242,26 +241,19 @@ func (l *lexer) errorf(format string, args ...any) stateFn {
 	return nil
 }
 
-// nextItem returns the next item from the input.
-// Called by the parser, not in the lexing goroutine.
-func (l *lexer) Run() {
+// Lex creates a new scanner for the input string.
+func lex(input string) *lexer {
+	l := &lexer{
+		input: input,
+		items: make([]item, 0),
+	}
 	state := lexClause
 	for {
 		state = state(l)
 		if state == nil {
-			return
+			return l
 		}
 	}
-}
-
-// Lex creates a new scanner for the input string.
-func Lex(name, input string) *lexer {
-	l := &lexer{
-		name:  name,
-		input: input,
-		items: make([]item, 0),
-	}
-	return l
 }
 
 func lexEOF(l *lexer) stateFn {

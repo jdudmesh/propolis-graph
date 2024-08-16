@@ -55,7 +55,9 @@ type Relation interface {
 }
 
 type Command interface {
+	Type() EntityType
 	Entity() Entity
+	Since() time.Time
 }
 
 type parseable interface {
@@ -233,40 +235,19 @@ func (m *mergeCmd) Type() EntityType {
 	return EntityTypeMergeCmd
 }
 
-func (m *mergeCmd) Identifier() string {
-	return "MERGE"
-}
-
-func (m *mergeCmd) Labels() []string {
-	return nil
-}
-
-func (m *mergeCmd) Attributes() map[string]Attribute {
-	return nil
-}
-
-func (m *mergeCmd) Attribute(k string) (string, bool) {
-	return "", false
+func (m *mergeCmd) Since() time.Time {
+	return time.Time{}
 }
 
 func (m *matchCmd) Type() EntityType {
 	return EntityTypeMatchCmd
 }
 
-func (m *matchCmd) Identifier() string {
-	return "MATCH"
-}
+func (m *matchCmd) Since() time.Time {
+	if m.since == nil {
 
-func (m *matchCmd) Labels() []string {
-	return nil
-}
-
-func (m *matchCmd) Attributes() map[string]Attribute {
-	return nil
-}
-
-func (m *matchCmd) Attribute(k string) (string, bool) {
-	return "", false
+	}
+	return m.since.value
 }
 
 func (n *node) Type() EntityType {
@@ -274,7 +255,7 @@ func (n *node) Type() EntityType {
 }
 
 func (n *node) Identifier() string {
-	return "MATCH"
+	return n.identifier
 }
 
 func (n *node) Labels() []string {
@@ -413,5 +394,18 @@ func (c matchCmd) Entity() Entity {
 }
 
 func (s *sinceClause) parse(p *parser) error {
+	i := p.pop()
+	if i.typ != itemText {
+		return fmt.Errorf("unexpected token: %s", i.val)
+	}
+	if !(i.val[0] == '\'' && i.val[len(i.val)-1] == '\'') {
+		return fmt.Errorf("invalid date time: %s", i.val)
+	}
+	val := i.val[1 : len(i.val)-1]
+	t, err := time.Parse(time.RFC3339, val)
+	if err != nil {
+		return fmt.Errorf("invalid date time: %s", i.val)
+	}
+	s.value = t
 	return nil
 }
