@@ -1,3 +1,19 @@
+/*
+Copyright © 2024 John Dudmesh <john@dudmesh.co.uk>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
 package executor
 
 import (
@@ -36,7 +52,7 @@ func New(stmt ast.Entity, s store, logger *slog.Logger) (*executor, error) {
 	}, nil
 }
 
-func (e *executor) Execute() (*Node, error) {
+func (e *executor) Execute() (any, error) {
 	if e.stmt == nil {
 		return nil, errors.New("no command found")
 	}
@@ -49,7 +65,7 @@ func (e *executor) Execute() (*Node, error) {
 		return nil, fmt.Errorf("creating tx: %w", err)
 	}
 
-	var res *Node
+	var res any
 	switch e.stmt.Type() {
 	case ast.EntityTypeMergeCmd:
 		res, err = e.finaliseMergeCmd(e.stmt.(ast.Command), tx)
@@ -70,301 +86,380 @@ func (e *executor) Execute() (*Node, error) {
 	return res, nil
 }
 
-func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) error {
-	_, err := e.checkNodeExists(n, tx)
-	if err != nil {
-		return err
-	}
-
+func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 	now := time.Now().UTC()
-	_, err = tx.Exec(`insert into nodes(id, created_at) values(?, ?) on conflict(id) do update set updated_at = ?`, n.ID(), now, now)
+
+	node, err := e.findNode(n, tx)
 	if err != nil {
-		return fmt.Errorf("upserting node: %w", err)
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
 	}
 
-	err = e.finaliseNodeLabels(n, tx)
-	if err != nil {
-		return fmt.Errorf("finalising labels: %w", err)
+	if node == nil {
+		id, err := gonanoid.New()
+		if err != nil {
+			return nil, fmt.Errorf("node id: %w", err)
+		}
+		node = &Node{
+			ID:        id,
+			CreatedAt: now,
+		}
+	} else {
+		node.UpdatedAt = &now
 	}
 
-	err = e.finaliseNodeAttributes(n, tx)
+	_, err = tx.NamedExec(`
+		insert into nodes(id, created_at)
+		values(:id, :created_at)
+		on conflict(id) do update
+		set updated_at = :updated_at`, node)
 	if err != nil {
-		return fmt.Errorf("finalising attrs: %w", err)
+		return nil, fmt.Errorf("upserting node: %w", err)
 	}
 
-	return nil
+	node.labels, err = e.finaliseNodeLabels(node.ID, n, tx)
+	if err != nil {
+		return nil, fmt.Errorf("finalising labels: %w", err)
+	}
+
+	node.attributes, err = e.finaliseNodeAttributes(node.ID, n, tx)
+	if err != nil {
+		return nil, fmt.Errorf("finalising attrs: %w", err)
+	}
+
+	return node, nil
 }
 
-func (e *executor) finaliseNodeLabels(n ast.Entity, tx *sqlx.Tx) error {
+func (e *executor) finaliseNodeLabels(nodeID string, n ast.Entity, tx *sqlx.Tx) ([]*NodeLabel, error) {
+	now := time.Now().UTC()
+	labels := []*NodeLabel{}
+
 	if len(n.Labels()) == 0 {
-		return nil
+		return labels, nil
 	}
 
-	labels := map[string]string{}
-	rows, err := tx.Queryx("select id, label from node_labels where node_id = ?", n.ID())
+	err := tx.Select(&labels, "select * from node_labels where node_id = ?", nodeID)
 	if err != nil {
-		return fmt.Errorf("querying labels: %w", err)
+		return nil, fmt.Errorf("querying labels: %w", err)
 	}
 
-	for rows.Next() {
-		l := struct {
-			ID    string `db:"id"`
-			Label string `db:"label"`
-		}{}
-		err = rows.StructScan(&l)
-		if err != nil {
-			return fmt.Errorf("scanning label: %w", err)
-		}
-		labels[l.Label] = l.ID
+	existing := map[string]*NodeLabel{}
+	for _, v := range labels {
+		existing[v.Label] = v
 	}
 
-	now := time.Now().UTC()
 	for _, l := range n.Labels() {
-		id := ""
-		if lid, ok := labels[l]; ok {
-			id = lid
-		} else {
-			id, err = gonanoid.New()
+		label := existing[l]
+		if label == nil {
+			id, err := gonanoid.New()
 			if err != nil {
-				return fmt.Errorf("label id: %w", err)
+				return nil, fmt.Errorf("label id: %w", err)
 			}
+			label = &NodeLabel{
+				ID:        id,
+				CreatedAt: now,
+				NodeID:    nodeID,
+				Label:     l,
+			}
+			labels = append(labels, label)
+		} else {
+			label.UpdatedAt = &now
 		}
-		_, err = tx.Exec("insert into node_labels(id, created_at, node_id, label) values(?, ?, ?, ?) on conflict(id) do update set updated_at = ?", id, now, n.ID(), l, now)
+
+		_, err = tx.NamedExec(`
+			insert into node_labels(id, created_at, node_id, label)
+			values(:id, :created_at, :node_id, :label)
+			on conflict(id) do update set updated_at = :updated_at`, label)
 		if err != nil {
-			return fmt.Errorf("inserting label: %w", err)
+			return nil, fmt.Errorf("inserting label: %w", err)
 		}
-		delete(labels, l)
+		delete(existing, l)
 	}
 
-	for _, id := range labels {
-		_, err = tx.Exec("delete from node_labels where id = ?", id)
+	for _, label := range existing {
+		_, err = tx.Exec("delete from node_labels where id = ?", label.ID)
 		if err != nil {
-			return fmt.Errorf("deleting label: %w", err)
+			return nil, fmt.Errorf("deleting label: %w", err)
 		}
 	}
 
-	return nil
+	labels2 := make([]*NodeLabel, 0, len(labels))
+	for _, l := range labels {
+		if _, ok := existing[l.Label]; ok {
+			continue
+		}
+		labels2 = append(labels2, l)
+	}
+
+	return labels2, nil
 }
 
-func (e *executor) finaliseNodeAttributes(n ast.Entity, tx *sqlx.Tx) error {
-	if len(n.Attributes()) == 0 {
-		return nil
-	}
-
-	attrs := map[string]string{}
-	rows, err := tx.Queryx("select id, attr_name from node_attributes where node_id = ?", n.ID())
-	if err != nil {
-		return fmt.Errorf("querying attrs: %w", err)
-	}
-
-	for rows.Next() {
-		a := struct {
-			ID       string `db:"id"`
-			AttrName string `db:"attr_name"`
-		}{}
-		err = rows.StructScan(&a)
-		if err != nil {
-			return fmt.Errorf("scanning attr: %w", err)
-		}
-		attrs[a.AttrName] = a.ID
-	}
-
+func (e *executor) finaliseNodeAttributes(nodeID string, n ast.Entity, tx *sqlx.Tx) ([]*NodeAttribute, error) {
 	now := time.Now().UTC()
-	for _, a := range n.Attributes() {
-		id := ""
-		if l, ok := attrs[a.Key()]; ok {
-			id = l
-		} else {
-			id, err = gonanoid.New()
-			if err != nil {
-				return fmt.Errorf("attr id: %w", err)
-			}
-		}
-		_, err = tx.Exec(`
-			insert into node_attributes(id, created_at, node_id, attr_name, attr_value, data_type)
-			values(?, ?, ?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, n.ID(), a.Key, a.Value, a.Type, now, a.Value)
-		if err != nil {
-			return fmt.Errorf("inserting attr: %w", err)
-		}
-		delete(attrs, a.Key())
+	attrs := []*NodeAttribute{}
+
+	if len(n.Attributes()) == 0 {
+		return attrs, nil
 	}
 
-	for _, id := range attrs {
+	err := tx.Select(&attrs, "select * from node_attributes where node_id = ?", nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("querying attrs: %w", err)
+	}
+
+	existing := map[string]*NodeAttribute{}
+	for _, a := range attrs {
+		existing[a.Name] = a
+	}
+
+	for _, a := range n.Attributes() {
+		attr := existing[a.Key()]
+		if attr == nil {
+			id, err := gonanoid.New()
+			if err != nil {
+				return nil, fmt.Errorf("attr id: %w", err)
+			}
+			attr = &NodeAttribute{
+				ID:        id,
+				CreatedAt: now,
+				NodeID:    nodeID,
+				Name:      a.Key(),
+			}
+			attrs = append(attrs, attr)
+		} else {
+			attr.UpdatedAt = &now
+		}
+		attr.Value = a.Value()
+		_, err = tx.NamedExec(`
+			insert into node_attributes(id, created_at, node_id, attr_name, attr_value, data_type)
+			values(:id, :created_at, :node_id, :attr_name, :attr_value, :data_type)
+			on conflict(id) do update set updated_at = :updated_at, attr_value = :attr_value`, &attr)
+		if err != nil {
+			return nil, fmt.Errorf("inserting attr: %w", err)
+		}
+		delete(existing, a.Key())
+	}
+
+	for _, id := range existing {
 		_, err = tx.Exec("delete from node_attributes where id = ?", id)
 		if err != nil {
-			return fmt.Errorf("deleting attr: %w", err)
+			return nil, fmt.Errorf("deleting attr: %w", err)
 		}
 	}
 
-	return nil
+	attrs2 := make([]*NodeAttribute, 0, len(attrs))
+	for _, a := range attrs {
+		if _, ok := existing[a.Name]; ok {
+			continue
+		}
+		attrs2 = append(attrs2, a)
+	}
+
+	return attrs2, nil
 }
 
-func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) error {
-	err := e.finaliseNode(r.Left(), tx)
+func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, error) {
+	now := time.Now().UTC()
+
+	left, err := e.finaliseNode(r.Left(), tx)
 	if err != nil {
-		return fmt.Errorf("finalising left node: %w", err)
+		return nil, fmt.Errorf("finalising left node: %w", err)
 	}
 
-	err = e.finaliseNode(r.Right(), tx)
+	right, err := e.finaliseNode(r.Right(), tx)
 	if err != nil {
-		return fmt.Errorf("finalising right node: %w", err)
+		return nil, fmt.Errorf("finalising right node: %w", err)
 	}
 
-	existing, err := e.findRelation(r, tx)
+	rel, err := e.findRelation(r, tx)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return err
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
 		}
 	}
 
-	now := time.Now().UTC()
-	_, err = tx.Exec(`
+	if rel == nil {
+		id, err := gonanoid.New()
+		if err != nil {
+			return nil, fmt.Errorf("rel id: %w", err)
+		}
+		rel = &Relation{
+			ID:        id,
+			CreatedAt: now,
+		}
+	} else {
+		rel.UpdatedAt = &now
+	}
+
+	rel.Direction = r.Direction()
+	rel.LeftNodeID = left.ID
+	rel.RightNodeID = right.ID
+	rel.leftNode = left
+	rel.rightNode = right
+
+	_, err = tx.NamedExec(`
 		insert into relations(id, created_at, left_node_id, right_node_id, direction)
-		values(?, ?, ?, ?, ?)
+		values(:id, :created_at, :left_node_id, :right_node_id, :direction)
 		on conflict(id) do update set
-		updated_at = ?,
-		left_node_id = ?,
-		right_node_id = ?,
-		direction = ?`, existing.ID, now, existing.le r.Left().ID(), r.Right().ID(), r.Direction(), now, r.Left().ID(), r.Right().ID(), r.Direction())
+		updated_at = :updated_at,
+		left_node_id = :left_node_id,
+		right_node_id = :right_node_id,
+		direction = :direction`, rel)
 	if err != nil {
-		return fmt.Errorf("upserting relation: %w", err)
+		return nil, fmt.Errorf("upserting relation: %w", err)
 	}
 
-	err = e.finaliseRelationLabels(r, tx)
+	rel.labels, err = e.finaliseRelationLabels(rel.ID, r, tx)
 	if err != nil {
-		return fmt.Errorf("finalising labels: %w", err)
+		return nil, fmt.Errorf("finalising labels: %w", err)
 	}
 
-	err = e.finaliseRelationAttributes(r, tx)
+	rel.attributes, err = e.finaliseRelationAttributes(rel.ID, r, tx)
 	if err != nil {
-		return fmt.Errorf("finalising attrs: %w", err)
+		return nil, fmt.Errorf("finalising attrs: %w", err)
 	}
 
-	return nil
+	return rel, nil
 }
 
-func (e *executor) finaliseRelationLabels(r ast.Relation, tx *sqlx.Tx) error {
+func (e *executor) finaliseRelationLabels(relationID string, r ast.Relation, tx *sqlx.Tx) ([]*RelationLabel, error) {
+	now := time.Now().UTC()
+	labels := []*RelationLabel{}
+
 	if len(r.Labels()) == 0 {
-		return nil
+		return labels, nil
 	}
 
-	labels := map[string]string{}
-	rows, err := tx.Queryx("select id, label from relation_labels where relation_id = ?", r.ID())
+	err := tx.Select(&labels, "select * from relation_labels where relation_id = ?", relationID)
 	if err != nil {
-		return fmt.Errorf("querying labels: %w", err)
+		return nil, fmt.Errorf("querying labels: %w", err)
 	}
 
-	for rows.Next() {
-		l := struct {
-			ID    string `db:"id"`
-			Label string `db:"label"`
-		}{}
-		err = rows.StructScan(&l)
-		if err != nil {
-			return fmt.Errorf("scanning label: %w", err)
-		}
-		labels[l.Label] = l.ID
+	existing := map[string]*RelationLabel{}
+	for _, v := range labels {
+		existing[v.Label] = v
 	}
 
-	now := time.Now().UTC()
 	for _, l := range r.Labels() {
-		id := ""
-		if lid, ok := labels[l]; ok {
-			id = lid
-		} else {
-			id, err = gonanoid.New()
+		label := existing[l]
+		if label == nil {
+			id, err := gonanoid.New()
 			if err != nil {
-				return fmt.Errorf("label id: %w", err)
+				return nil, fmt.Errorf("label id: %w", err)
 			}
+			label = &RelationLabel{
+				ID:         id,
+				CreatedAt:  now,
+				RelationID: relationID,
+				Label:      l,
+			}
+			labels = append(labels, label)
+		} else {
+			label.UpdatedAt = &now
 		}
-		_, err = tx.Exec(`
+
+		_, err = tx.NamedExec(`
 			insert into relation_labels(id, created_at, relation_id, label)
-			values(?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?`, id, now, r.ID(), l, now)
+			values(:id, :created_at, :relation_id, :label)
+			on conflict(id) do update set updated_at = :updated_at`, label)
 		if err != nil {
-			return fmt.Errorf("inserting label: %w", err)
+			return nil, fmt.Errorf("inserting label: %w", err)
 		}
-		delete(labels, l)
+		delete(existing, l)
 	}
 
-	for _, id := range labels {
-		_, err = tx.Exec("delete from relation_labels where id = ?", id)
+	for _, label := range existing {
+		_, err = tx.Exec("delete from relation_labels where id = ?", label.ID)
 		if err != nil {
-			return fmt.Errorf("deleting label: %w", err)
+			return nil, fmt.Errorf("deleting label: %w", err)
 		}
 	}
 
-	return nil
+	labels2 := make([]*RelationLabel, 0, len(labels))
+	for _, l := range labels {
+		if _, ok := existing[l.Label]; ok {
+			continue
+		}
+		labels2 = append(labels2, l)
+	}
+
+	return labels2, nil
 }
 
-func (e *executor) finaliseRelationAttributes(r ast.Relation, tx *sqlx.Tx) error {
-	if len(r.Attributes()) == 0 {
-		return nil
-	}
-
-	attrs := map[string]string{}
-	rows, err := tx.Queryx("select id, attr_name from relation_attributes where relation_id = ?", r.ID())
-	if err != nil {
-		return fmt.Errorf("querying attrs: %w", err)
-	}
-
-	for rows.Next() {
-		a := struct {
-			ID       string `db:"id"`
-			AttrName string `db:"attr_name"`
-		}{}
-		err = rows.StructScan(&a)
-		if err != nil {
-			return fmt.Errorf("scanning attr: %w", err)
-		}
-		attrs[a.AttrName] = a.ID
-	}
-
+func (e *executor) finaliseRelationAttributes(relationID string, r ast.Relation, tx *sqlx.Tx) ([]*RelationAttribute, error) {
 	now := time.Now().UTC()
-	for _, a := range r.Attributes() {
-		id := ""
-		if l, ok := attrs[a.Key()]; ok {
-			id = l
-		} else {
-			id, err = gonanoid.New()
-			if err != nil {
-				return fmt.Errorf("attr id: %w", err)
-			}
-		}
-		_, err = tx.Exec(`
-			insert into relation_attributes(id, created_at, relation_id, attr_name, attr_value, data_type)
-			values(?, ?, ?, ?, ?, ?)
-			on conflict(id) do update set updated_at = ?, attr_value = ?`, id, now, r.ID(), a.Key, a.Value, a.Type, now, a.Value)
-		if err != nil {
-			return fmt.Errorf("inserting attr: %w", err)
-		}
-		delete(attrs, a.Key())
+	attrs := []*RelationAttribute{}
+
+	if len(r.Attributes()) == 0 {
+		return attrs, nil
 	}
 
-	for _, id := range attrs {
+	err := tx.Select(&attrs, "select * from relation_attributes where relation_id = ?", relationID)
+	if err != nil {
+		return nil, fmt.Errorf("querying attrs: %w", err)
+	}
+
+	existing := map[string]*RelationAttribute{}
+	for _, a := range attrs {
+		existing[a.Name] = a
+	}
+
+	for _, a := range r.Attributes() {
+		attr := existing[a.Key()]
+		if attr == nil {
+			id, err := gonanoid.New()
+			if err != nil {
+				return nil, fmt.Errorf("attr id: %w", err)
+			}
+			attr = &RelationAttribute{
+				ID:         id,
+				CreatedAt:  now,
+				RelationID: relationID,
+				Name:       a.Key(),
+			}
+			attrs = append(attrs, attr)
+		} else {
+			attr.UpdatedAt = &now
+		}
+		attr.Value = a.Value()
+		_, err = tx.NamedExec(`
+			insert into relation_attributes(id, created_at, relation_id, attr_name, attr_value, data_type)
+			values(:id, :created_at, :relation_id, :attr_name, :attr_value, :data_type)
+			on conflict(id) do update set updated_at = :updated_at, attr_value = :attr_value`, &attr)
+		if err != nil {
+			return nil, fmt.Errorf("inserting attr: %w", err)
+		}
+		delete(existing, a.Key())
+	}
+
+	for _, id := range existing {
 		_, err = tx.Exec("delete from relation_attributes where id = ?", id)
 		if err != nil {
-			return fmt.Errorf("deleting attr: %w", err)
+			return nil, fmt.Errorf("deleting attr: %w", err)
 		}
 	}
 
-	return nil
+	attrs2 := make([]*RelationAttribute, 0, len(attrs))
+	for _, a := range attrs {
+		if _, ok := existing[a.Name]; ok {
+			continue
+		}
+		attrs2 = append(attrs2, a)
+	}
+
+	return attrs2, nil
 }
 
-func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (*Node, error) {
-	var node *Node
-	var err error
-
+func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (any, error) {
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
-		node, err = e.finaliseNode(cmd.Entity(), tx)
+		return e.finaliseNode(cmd.Entity(), tx)
 	case ast.EntityTypeRelation:
-		node, err = e.finaliseRelation(cmd.Entity().(ast.Relation), tx)
+		return e.finaliseRelation(cmd.Entity().(ast.Relation), tx)
 	default:
 		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
 	}
-	return node, err
 }
 
 func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (*Node, error) {
@@ -391,8 +486,8 @@ func (e *executor) findNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 				inner join (select * from node_attributes where attr_name = ? and attr_value = ?) na%d
 				on n.id = na%d.node_id
 			`, i, i))
-			args = append(args, v.Key)
-			args = append(args, v.Value)
+			args = append(args, v.Key())
+			args = append(args, v.Value())
 			i++
 		}
 		for _, l := range n.Labels() {
@@ -450,8 +545,8 @@ func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
 				inner join (select * from relation_attributes where attr_name = ? and attr_value = ?) ra%d
 				on r.id = ra%d.relation_id
 			`, i, i))
-			args = append(args, v.Key)
-			args = append(args, v.Value)
+			args = append(args, v.Key())
+			args = append(args, v.Value())
 			i++
 		}
 		for _, l := range r.Labels() {
@@ -492,4 +587,6 @@ func (e *executor) findRelation(r ast.Entity, tx *sqlx.Tx) (*Relation, error) {
 	return res, nil
 }
 
-populateRelation
+func (e *executor) queryNodes(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
+	return nil, nil
+}

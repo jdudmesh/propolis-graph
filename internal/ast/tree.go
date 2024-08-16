@@ -1,3 +1,19 @@
+/*
+Copyright © 2024 John Dudmesh <john@dudmesh.co.uk>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+*/
 package ast
 
 import (
@@ -18,17 +34,16 @@ const (
 
 type Attribute interface {
 	Key() string
-	Value() any
+	Value() string
 	Type() AttributeDataType
 }
 
 type Entity interface {
-	ID() EntityID
 	Type() EntityType
 	Identifier() string
 	Labels() []string
 	Attributes() map[string]Attribute
-	Attribute(string) (any, bool)
+	Attribute(string) (string, bool)
 }
 
 type Relation interface {
@@ -68,7 +83,6 @@ const (
 )
 
 type entity struct {
-	id         EntityID
 	typ        EntityType
 	identifier string
 	labels     []string
@@ -96,12 +110,8 @@ type relation struct {
 
 type attribute struct {
 	key   string
-	value any
+	value string
 	typ   AttributeDataType
-}
-
-func (e entity) ID() EntityID {
-	return e.id
 }
 
 func (e entity) Type() EntityType {
@@ -120,11 +130,11 @@ func (e entity) Attributes() map[string]Attribute {
 	return e.attributes
 }
 
-func (e entity) Attribute(k string) (any, bool) {
+func (e entity) Attribute(k string) (string, bool) {
 	if val, ok := e.attributes[k]; ok {
-		return val, true
+		return val.Value(), true
 	} else {
-		return nil, false
+		return "", false
 	}
 }
 
@@ -204,10 +214,6 @@ func (m *mergeCmd) parse(p *parser) error {
 	}
 }
 
-func (m *mergeCmd) ID() EntityID {
-	return EntityID("MERGE")
-}
-
 func (m *mergeCmd) Type() EntityType {
 	return EntityTypeMergeCmd
 }
@@ -224,8 +230,8 @@ func (m *mergeCmd) Attributes() map[string]Attribute {
 	return nil
 }
 
-func (m *mergeCmd) Attribute(k string) (any, bool) {
-	return nil, false
+func (m *mergeCmd) Attribute(k string) (string, bool) {
+	return "", false
 }
 
 func (m *matchCmd) parse(p *parser) error {
@@ -251,10 +257,6 @@ func (m *matchCmd) parse(p *parser) error {
 	}
 }
 
-func (m *matchCmd) ID() EntityID {
-	return EntityID("MATCH")
-}
-
 func (m *matchCmd) Type() EntityType {
 	return EntityTypeMatchCmd
 }
@@ -271,8 +273,8 @@ func (m *matchCmd) Attributes() map[string]Attribute {
 	return nil
 }
 
-func (m *matchCmd) Attribute(k string) (any, bool) {
-	return nil, false
+func (m *matchCmd) Attribute(k string) (string, bool) {
+	return "", false
 }
 
 func (n *node) Type() EntityType {
@@ -284,11 +286,11 @@ func (n *node) Identifier() string {
 }
 
 func (n *node) Labels() []string {
-	return nil
+	return n.labels
 }
 
 func (n *node) Attributes() map[string]Attribute {
-	return nil
+	return n.attributes
 }
 
 func (n *node) parse(p *parser) error {
@@ -327,11 +329,11 @@ func (r *relation) Identifier() string {
 }
 
 func (r *relation) Labels() []string {
-	return nil
+	return r.labels
 }
 
 func (r *relation) Attributes() map[string]Attribute {
-	return nil
+	return r.attributes
 }
 
 func (r *relation) Direction() RelationDir {
@@ -399,7 +401,7 @@ func (a attribute) Key() string {
 	return a.key
 }
 
-func (a attribute) Value() any {
+func (a attribute) Value() string {
 	return a.value
 }
 
