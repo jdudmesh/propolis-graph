@@ -35,8 +35,8 @@ func setup(t *testing.T) (store, *slog.Logger) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 
 	cur := os.Getenv("WORKSPACE_DIR")
-	dbConn := "file::memory:?cache=shared"
-	//dbConn := fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cur)
+	//dbConn := "file::memory:?cache=shared"
+	dbConn := fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cur)
 	store, err := datastore.NewInternalState(dbConn, cur+"/migrations", []string{}, []string{})
 	assert.NoError(t, err)
 	if store == nil {
@@ -102,7 +102,7 @@ func TestExecutorQuery(t *testing.T) {
 	_, err = e.Execute()
 	assert.NoError(err)
 
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
 	testStmt2 := fmt.Sprintf("MATCH (i:Identity:Person {name: 'john'})-[r]-(c) SINCE '%s'", now)
 
 	t.Run("find", func(t *testing.T) {

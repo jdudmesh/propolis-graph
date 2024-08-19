@@ -472,17 +472,9 @@ func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (any, error) {
 func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (SearchResults, error) {
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
-		node, err := e.findNode(cmd.Entity(), tx)
-		if err != nil {
-			return nil, err
-		}
-		ident := cmd.Entity().Identifier()
-		if ident == "" {
-			ident = "_"
-		}
-		return SearchResults{ident: node}, nil
+		return e.searchNodes(cmd.Entity(), cmd.Since(), tx)
 	case ast.EntityTypeRelation:
-		return e.searchNodes(cmd.Entity().(ast.Relation), cmd.Since(), tx)
+		return e.searchRelations(cmd.Entity().(ast.Relation), cmd.Since(), tx)
 	default:
 		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
 	}
@@ -607,177 +599,199 @@ func (e *executor) findRelation(r ast.Relation, leftNodeId, rightNodeId string, 
 	return res, nil
 }
 
-func (e *executor) searchNodes(r ast.Relation, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
-	res := make(SearchResults)
-
-	// left hand node must exist
-	node, err := e.findNode(r.Left(), tx)
+func (e *executor) searchNodes(clause ast.Entity, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
+	subquery, args, err := e.buildNodeClause("n_", clause)
 	if err != nil {
-		return nil, fmt.Errorf("left node: %w", err)
+		return nil, err
 	}
 
-	ident := r.Left().Identifier()
-	if ident != "" {
-		res[ident] = node
+	if !since.IsZero() {
+		args["since"] = since
 	}
 
-	rels, err := e.searchRelation(r, node.ID, "", tx)
-	if err != nil {
-		return nil, fmt.Errorf("left node: %w", err)
-	}
-	ident = r.Identifier()
-	if ident != "" {
-		res[ident] = rels
-	}
-
-	return res, nil
-}
-
-func (e *executor) searchRelation(r ast.Relation, leftNodeId, rightNodeId string, tx *sqlx.Tx) ([]*Relation, error) {
-	results := []*Relation{}
-
-	args := []any{}
 	query := strings.Builder{}
-	query.WriteString("select r.* from relations r\n")
+	query.WriteString("with n as (")
+	query.WriteString(subquery)
+	query.WriteString(")\n")
 
-	if val, ok := r.Attribute("id"); ok {
-		query.WriteString("where r.id = ?")
-		args = append(args, val)
-	} else {
-		i := 0
-		for _, v := range r.Attributes() {
-			query.WriteString(fmt.Sprintf(`
-				inner join (select * from relation_attributes where attr_name = ? and attr_value = ?) ra%d
-				on r.id = ra%d.relation_id
-			`, i, i))
-			args = append(args, v.Key())
-			args = append(args, v.Value())
-			i++
-		}
-		for _, l := range r.Labels() {
-			query.WriteString(fmt.Sprintf(`
-				inner join (select * from relation_labels where label = ?) rl%d
-				on r.id = rl%d.relation_id`, i, i))
-			args = append(args, l)
-			i++
-		}
-
-		ands := []string{}
-		if leftNodeId != "" {
-			ands = append(ands, "left_node_id = ?")
-			args = append(args, leftNodeId)
-		}
-		if rightNodeId != "" {
-			ands = append(ands, "right_node_id = ?")
-			args = append(args, rightNodeId)
-		}
-		if len(ands) > 0 {
-			query.WriteString("\nwhere ")
-			query.WriteString(strings.Join(ands, " and "))
-		}
+	query.WriteString("select id, null left_node_id, null right_node_id from n ")
+	if !since.IsZero() {
+		query.WriteString("where n_since > :since")
 	}
 
-	rows, err := tx.Queryx(query.String(), args...)
+	rows, err := tx.NamedQuery(query.String(), args)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("searching relations: %w", err)
-		}
-		return results, nil
+		return nil, fmt.Errorf("executing search: %w", err)
 	}
 	defer rows.Close()
-	for rows.Next() {
-		r := &Relation{}
-		err = rows.StructScan(r)
-		if err != nil {
-			return nil, fmt.Errorf("scanning row: %w", err)
-		}
-		r.attributes = []*RelationAttribute{}
-		err = tx.Select(&r.attributes, "select * from relation_attributes where relation_id = ?", r.ID)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("fetching relation: %w", err)
-			}
-		}
 
-		r.labels = []*RelationLabel{}
-		err = tx.Select(&r.labels, "select * from relation_labels where relation_id = ?", r.ID)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("fetching relation: %w", err)
-			}
-		}
-
-		results = append(results, r)
-	}
-
-	return results, nil
+	return e.extractResults(rows)
 }
 
-func (e *executor) search(clause ast.Entity, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
+func (e *executor) searchRelations(clause ast.Relation, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
 	queries := map[string]string{}
-	args := map[string]string{}
-
-	switch clause.Type() {
-	case ast.EntityTypeNode:
-		n, a, err := e.buildNodeClause("n_", clause, since)
-		if err != nil {
-			return nil, err
-		}
-		queries["node"] = n
-		maps.Insert(args, maps.All(a))
-	case ast.EntityTypeRelation:
-		left, aleft, err := e.buildNodeClause("l_", clause.(ast.Relation).Left(), since)
-		if err != nil {
-			return nil, err
-		}
-		queries["left"] = left
-		maps.Insert(args, maps.All(aleft))
-
-		right, aright, err := e.buildNodeClause("r_", clause.(ast.Relation).Right(), since)
-		if err != nil {
-			return nil, err
-		}
-		queries["right"] = right
-		maps.Insert(args, maps.All(aright))
-
-		rel, arel, err := e.buildRelationClause("rel_", clause.(ast.Relation), since)
-		if err != nil {
-			return nil, err
-		}
-		queries["rel"] = rel
-		maps.Insert(args, maps.All(arel))
+	args := map[string]any{
+		"direction_l":   ast.RelationDirLeft,
+		"direction_r":   ast.RelationDirRight,
+		"direction_neu": ast.RelationDirNeutral,
 	}
 
+	if !since.IsZero() {
+		args["since"] = since
+	}
+
+	left, aleft, err := e.buildNodeClause("l_", clause.(ast.Relation).Left())
+	if err != nil {
+		return nil, err
+	}
+	queries["lnode"] = left
+	maps.Insert(args, maps.All(aleft))
+
+	right, aright, err := e.buildNodeClause("r_", clause.(ast.Relation).Right())
+	if err != nil {
+		return nil, err
+	}
+	queries["rnode"] = right
+	maps.Insert(args, maps.All(aright))
+
+	rel, arel, err := e.buildRelationClause("rel_", clause.(ast.Relation))
+	if err != nil {
+		return nil, err
+	}
+	queries["rel"] = rel
+	maps.Insert(args, maps.All(arel))
+
 	query := strings.Builder{}
+	query.WriteString("with ")
+	subqs := []string{}
 	for k, v := range queries {
-		query.WriteString("with ")
-		query.WriteString(k)
-		query.WriteString(" as (")
-		query.WriteString(v)
-		query.WriteString(")\n")
+		sb := strings.Builder{}
+		sb.WriteString(k)
+		sb.WriteString(" as (")
+		sb.WriteString(v)
+		sb.WriteString(")")
+		subqs = append(subqs, sb.String())
+	}
+	query.WriteString(strings.Join(subqs, ", "))
+	query.WriteString("\n")
+
+	switch clause.Direction() {
+	case ast.RelationDirLeft:
+		query.WriteString(`
+		select rel.id, rel.left_node_id, rel.right_node_id from rel
+		inner join lnode
+		on rel.left_node_id = lnode.id
+		inner join rnode
+		on rel.right_node_id = rnode.id
+		where rel.direction = :direction_r
+		union
+		select rel.id, rel.left_node_id, rel.right_node_id from rel
+		inner join lnode
+		on rel.left_node_id = rnode.id
+		inner join rnode
+		on rel.right_node_id = lnode.id
+		where rel.direction = :direction_l
+	`)
+	case ast.RelationDirRight:
+		query.WriteString(`
+		select rel.id, rel.left_node_id, rel.right_node_id from rel
+		inner join lnode
+		on rel.left_node_id = rnode.id
+		inner join rnode
+		on rel.right_node_id = lnode.id
+		where rel.direction = :direction_l
+		union
+		select rel.id, rel.left_node_id, rel.right_node_id from rel
+		inner join lnode
+		on rel.left_node_id = lnode.id
+		inner join rnode
+		on rel.right_node_id = rnode.id
+		where rel.direction = :direction_r
+	`)
+	case ast.RelationDirNeutral:
+		query.WriteString(`
+		select rel.id, rel.left_node_id, rel.right_node_id from rel
+		inner join lnode
+		on rel.left_node_id = lnode.id
+		inner join rnode
+		on rel.right_node_id = rnode.id
+		union
+		select rel.id, rel.left_node_id, rel.right_node_id from rel
+		inner join lnode
+		on rel.left_node_id = rnode.id
+		inner join rnode
+		on rel.right_node_id = lnode.id
+	`)
 	}
 
-	if _, ok := queries["node"]; ok {
-		query.WriteString("select * from node;")
-		rows, err := tx.NamedExec(query.String(), args)
-		if err != nil {
-			return nil, fmt.Errorf("querying nodes: %w", err)
+	if !since.IsZero() {
+		query.WriteString(" and rel.updated_at > :since or lnode.updated_at > :since or rnode.updated_at > :since")
+	}
+
+	fmt.Println(query.String())
+
+	rows, err := tx.NamedQuery(query.String(), args)
+	if err != nil {
+		return nil, fmt.Errorf("executing search: %w", err)
+	}
+	defer rows.Close()
+
+	idents := []string{
+		clause.Identifier(),
+		clause.Left().Identifier(),
+		clause.Right().Identifier(),
+	}
+	return e.extractResults(idents, rows, tx)
+}
+
+func (e *executor) extractResults(idents []string, rows *sqlx.Rows, tx *sqlx.Tx) (SearchResults, error) {
+	cache := map[string]any
+	results := SearchResults{}
+	for _, i := range idents {
+		results[i] = []any
+	}
+
+	cols, _ := rows.Columns()
+	for rows.Next() {
+		vals := make([]interface{}, len(cols))
+		ptrs := make([]interface{}, len(cols))
+		for i := range cols {
+			ptrs[i] = &vals[i]
 		}
-		return e.extractResults(rows)
+
+		err := rows.Scan(ptrs...)
+		if err != nil {
+			return nil, fmt.Errorf("scanning search results: %w", err)
+		}
+
+		entityID := *(ptrs[0].(*interface{}))
+		leftNodeID := *(ptrs[1].(*interface{}))
+		rightNodeID := *(ptrs[2].(*interface{}))
+
+		if v, ok := cache[entityID]; ok {
+			results[idents[0]] = append(results[idents[0]], v)
+		} else {
+			if len(idents) == 1 {
+				ent := &Node{}
+				tx.Get(ent, "select * from nodes where id = ?", entityID)
+				cache[ent.ID] = ent
+				results[idents[0]] = append(results[idents[0]], ent)
+			} else {
+				ent := &Relation{}
+				tx.Get(ent, "select * from relations where id = ?", entityID)
+				cache[ent.ID] = ent
+			}
+		}
 	}
 
 	return nil, nil
 }
 
-func (e *executor) extractResults(rows sql.Result) (SearchResults, error) {
-	return nil, nil
-}
-
-func (e *executor) buildNodeClause(prefix string, n ast.Entity, since time.Time) (string, map[string]string, error) {
+func (e *executor) buildNodeClause(prefix string, n ast.Entity) (string, map[string]any, error) {
 	query := strings.Builder{}
-	args := map[string]string{}
+	args := map[string]any{}
 
-	query.WriteString(fmt.Sprintf("select n.id %sid from nodes n\n", prefix))
+	query.WriteString("select n.id, coalesce(n.updated_at, n.created_at) updated_at from nodes n\n")
 	if val, ok := n.Attribute("id"); ok {
 		query.WriteString(fmt.Sprintf("where n.id = :%sid", prefix))
 		args[fmt.Sprintf("%sid", prefix)] = val
@@ -798,7 +812,8 @@ func (e *executor) buildNodeClause(prefix string, n ast.Entity, since time.Time)
 	for _, l := range n.Labels() {
 		query.WriteString(fmt.Sprintf(`
 			inner join (select * from node_labels where label = :%slabel) nl%d
-			on n.id = nl%d.node_id`, prefix, i, i))
+			on n.id = nl%d.node_id
+		`, prefix, i, i))
 		args[fmt.Sprintf("%slabel", prefix)] = l
 		i++
 	}
@@ -806,11 +821,11 @@ func (e *executor) buildNodeClause(prefix string, n ast.Entity, since time.Time)
 	return query.String(), args, nil
 }
 
-func (e *executor) buildRelationClause(prefix string, r ast.Relation, since time.Time) (string, map[string]string, error) {
+func (e *executor) buildRelationClause(prefix string, r ast.Relation) (string, map[string]any, error) {
 	query := strings.Builder{}
-	args := map[string]string{}
+	args := map[string]any{}
 
-	query.WriteString(fmt.Sprintf("select r.id %sid from relations r\n", prefix))
+	query.WriteString("select r.id, left_node_id, right_node_id, r.direction, coalesce(r.updated_at, r.created_at) updated_at from relations r\n")
 	if val, ok := r.Attribute("id"); ok {
 		query.WriteString(fmt.Sprintf("where r.id = :%sid", prefix))
 		args[fmt.Sprintf("%sid", prefix)] = val

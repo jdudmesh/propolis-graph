@@ -187,6 +187,9 @@ func (e *entity) parseAttr(p *parser) error {
 }
 
 func (c *entityClause) parse(p *parser) error {
+	pendingDir := RelationDirNeutral
+	pendingRelation := (*relation)(nil)
+
 	p.accept()
 	for {
 		i := p.pop()
@@ -213,12 +216,30 @@ func (c *entityClause) parse(p *parser) error {
 				r.right = n
 			}
 		case itemRelationDirNeutral:
-			fallthrough
+			i2 := p.pop()
+			if i2.typ == itemRelationDirRight {
+				pendingRelation.direction = RelationDirRight
+				p.accept()
+				continue
+			}
+			p.back()
+			pendingDir = RelationDirNeutral
 		case itemRelationDirLeft:
+			i2 := p.pop()
+			if i2.typ != itemRelationDirNeutral {
+				return fmt.Errorf("unexpected entity: %v", i2)
+			}
+			pendingDir = RelationDirLeft
+			p.accept()
+		case itemRelationDirRight:
+			pendingRelation.direction = RelationDirRight
+		case itemRelationStart:
 			r, err := p.relation()
 			if err != nil {
 				return err
 			}
+			pendingRelation = r
+			pendingRelation.direction = pendingDir
 			if n, ok := c.entity.(*node); !ok {
 				return fmt.Errorf("unexpected entity: %v", n)
 			} else {
@@ -322,29 +343,6 @@ func (r *relation) Right() Entity {
 }
 
 func (r *relation) parse(p *parser) error {
-	for {
-		i := p.pop()
-		switch i.typ {
-		case itemRelationDirNeutral:
-			p.accept()
-			return nil
-		case itemRelationDirLeft:
-			r.direction = RelationDirLeft
-		case itemRelationDirRight:
-			r.direction = RelationDirRight
-			p.accept()
-			return nil
-		case itemRelationStart:
-			r.parseInner(p)
-		case itemEOF:
-			return ErrUnexpectedEndOfInput
-		default:
-			return fmt.Errorf("unknown token: %s (%d)", i.val, i.pos)
-		}
-	}
-}
-
-func (r *relation) parseInner(p *parser) error {
 	for {
 		i := p.pop()
 		switch i.typ {
