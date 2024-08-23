@@ -319,7 +319,7 @@ func (r *relation) Type() EntityType {
 }
 
 func (r *relation) Identifier() string {
-	return "MATCH"
+	return r.identifier
 }
 
 func (r *relation) Labels() []string {

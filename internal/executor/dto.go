@@ -80,4 +80,6 @@ type RelationLabel struct {
 	Label      string     `db:"label"`
 }
 
-type SearchResults map[string]any
+type SearchResults struct {
+	data map[string][]any
+}

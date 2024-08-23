@@ -86,7 +86,7 @@ func TestExecutorCRUD(t *testing.T) {
 
 }
 
-func TestExecutorQuery(t *testing.T) {
+func TestExecutorSearch(t *testing.T) {
 	assert := assert.New(t)
 	store, logger := setup(t)
 

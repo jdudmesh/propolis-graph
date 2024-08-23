@@ -469,7 +469,7 @@ func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (any, error) {
 	}
 }
 
-func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (SearchResults, error) {
+func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (*SearchResults, error) {
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
 		return e.searchNodes(cmd.Entity(), cmd.Since(), tx)
@@ -599,7 +599,7 @@ func (e *executor) findRelation(r ast.Relation, leftNodeId, rightNodeId string, 
 	return res, nil
 }
 
-func (e *executor) searchNodes(clause ast.Entity, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
+func (e *executor) searchNodes(clause ast.Entity, since time.Time, tx *sqlx.Tx) (*SearchResults, error) {
 	subquery, args, err := e.buildNodeClause("n_", clause)
 	if err != nil {
 		return nil, err
@@ -614,7 +614,7 @@ func (e *executor) searchNodes(clause ast.Entity, since time.Time, tx *sqlx.Tx) 
 	query.WriteString(subquery)
 	query.WriteString(")\n")
 
-	query.WriteString("select id, null left_node_id, null right_node_id from n ")
+	query.WriteString("select rel_id null, id left_node_id, null right_node_id from n ")
 	if !since.IsZero() {
 		query.WriteString("where n_since > :since")
 	}
@@ -625,10 +625,13 @@ func (e *executor) searchNodes(clause ast.Entity, since time.Time, tx *sqlx.Tx) 
 	}
 	defer rows.Close()
 
-	return e.extractResults(rows)
+	idents := []string{
+		clause.Identifier(),
+	}
+	return e.extractResults(idents, rows, tx)
 }
 
-func (e *executor) searchRelations(clause ast.Relation, since time.Time, tx *sqlx.Tx) (SearchResults, error) {
+func (e *executor) searchRelations(clause ast.Relation, since time.Time, tx *sqlx.Tx) (*SearchResults, error) {
 	queries := map[string]string{}
 	args := map[string]any{
 		"direction_l":   ast.RelationDirLeft,
@@ -744,19 +747,20 @@ func (e *executor) searchRelations(clause ast.Relation, since time.Time, tx *sql
 	return e.extractResults(idents, rows, tx)
 }
 
-func (e *executor) extractResults(idents []string, rows *sqlx.Rows, tx *sqlx.Tx) (SearchResults, error) {
-	cache := map[string]any
-	results := SearchResults{}
+func (e *executor) extractResults(idents []string, rows *sqlx.Rows, tx *sqlx.Tx) (*SearchResults, error) {
+	results := &SearchResults{
+		data: map[string][]any{},
+	}
 	for _, i := range idents {
-		results[i] = []any
+		results.data[i] = []any{}
 	}
 
 	cols, _ := rows.Columns()
 	for rows.Next() {
 		vals := make([]interface{}, len(cols))
 		ptrs := make([]interface{}, len(cols))
-		for i := range cols {
-			ptrs[i] = &vals[i]
+		for id := range cols {
+			ptrs[id] = &vals[id]
 		}
 
 		err := rows.Scan(ptrs...)
@@ -764,27 +768,42 @@ func (e *executor) extractResults(idents []string, rows *sqlx.Rows, tx *sqlx.Tx)
 			return nil, fmt.Errorf("scanning search results: %w", err)
 		}
 
-		entityID := *(ptrs[0].(*interface{}))
-		leftNodeID := *(ptrs[1].(*interface{}))
-		rightNodeID := *(ptrs[2].(*interface{}))
-
-		if v, ok := cache[entityID]; ok {
-			results[idents[0]] = append(results[idents[0]], v)
-		} else {
-			if len(idents) == 1 {
-				ent := &Node{}
-				tx.Get(ent, "select * from nodes where id = ?", entityID)
-				cache[ent.ID] = ent
-				results[idents[0]] = append(results[idents[0]], ent)
+		for i, e := range ptrs {
+			entityID := *(e.(*interface{}))
+			if entityID == nil {
+				continue
+			}
+			if i == 0 {
+				err := results.appendEntity(entityID.(string), idents[i], &Relation{}, tx)
+				if err != nil {
+					return nil, fmt.Errorf("fetching relation: %w", err)
+				}
 			} else {
-				ent := &Relation{}
-				tx.Get(ent, "select * from relations where id = ?", entityID)
-				cache[ent.ID] = ent
+				err := results.appendEntity(entityID.(string), idents[i], &Node{}, tx)
+				if err != nil {
+					return nil, fmt.Errorf("fetching relation: %w", err)
+				}
 			}
 		}
 	}
 
-	return nil, nil
+	return results, nil
+}
+
+func (s *SearchResults) appendEntity(entityID, ident string, target any, tx *sqlx.Tx) error {
+	var err error
+	switch target.(type) {
+	case *Relation:
+		err = tx.Get(target, "select * from relations where id = ?", entityID)
+	case *Node:
+		err = tx.Get(target, "select * from nodes where id = ?", entityID)
+	default:
+		return errors.New("unknown target type")
+	}
+	if target != nil {
+		s.data[ident] = append(s.data[ident], target)
+	}
+	return err
 }
 
 func (e *executor) buildNodeClause(prefix string, n ast.Entity) (string, map[string]any, error) {
