@@ -35,22 +35,22 @@ var (
 	ErrNotFound = errors.New("not found")
 )
 
-type store interface {
+type ExecutorStore interface {
 	CreateTx(ctx context.Context) (*sqlx.Tx, error)
 }
 
 type executor struct {
 	stmt   any
-	store  store
+	store  ExecutorStore
 	logger *slog.Logger
 }
 
-func New(stmt any, s store, logger *slog.Logger) (*executor, error) {
+func New(stmt any, s ExecutorStore, logger *slog.Logger) *executor {
 	return &executor{
 		stmt:   stmt,
 		logger: logger,
 		store:  s,
-	}, nil
+	}
 }
 
 func (e *executor) Execute() (any, error) {

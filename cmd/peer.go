@@ -28,7 +28,7 @@ import (
 
 var peerCmd = &cobra.Command{
 	Use:   "peer",
-	Short: "Propolis peer",
+	Short: "Propolis peer server",
 	Long:  `Run propolis in peer mode`,
 	Run: func(cmd *cobra.Command, args []string) {
 		host, err := cmd.Flags().GetString("host")

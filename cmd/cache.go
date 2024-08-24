@@ -24,10 +24,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var seedCmd = &cobra.Command{
-	Use:   "seed",
-	Short: "Propolis seed server",
-	Long:  `Run propolis in seed mode`,
+var cacheCmd = &cobra.Command{
+	Use:   "cache",
+	Short: "Propolis cache server",
+	Long:  `Run propolis in cache mode`,
 	Run: func(cmd *cobra.Command, args []string) {
 		host, err := cmd.Flags().GetString("host")
 		if err != nil {
@@ -60,7 +60,7 @@ var seedCmd = &cobra.Command{
 			panic("unable to init state store")
 		}
 
-		h, err := node.NewSeed(host, port, stateStore, logger)
+		h, err := node.NewCache(host, port, stateStore, logger)
 		if err != nil {
 			logger.Error("creating peer", "error", err)
 			return

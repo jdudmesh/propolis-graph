@@ -36,6 +36,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jdudmesh/propolis/internal/ast"
+	"github.com/jdudmesh/propolis/internal/executor"
 	"github.com/jdudmesh/propolis/internal/model"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
@@ -47,6 +49,7 @@ const (
 
 	HeaderRemotAddress = "x-propolis-remote-address"
 	HeaderActionID     = "x-propolis-action-id"
+	HeaderNodeID       = "x-propolis-node-id"
 	HeaderSender       = "x-propolis-sender"
 	HeaderSignature    = "x-propolis-signature"
 
@@ -58,9 +61,20 @@ type NodeType int
 const (
 	NodeTypeSeed NodeType = iota
 	NodeTypePeer
+	NodeTypeCache
 )
 
+type Action struct {
+	ID         string
+	RemoteAddr string
+	NodeID     string
+	Timestamp  time.Time
+	Action     string
+	Command    ast.Command
+}
+
 type peerStore interface {
+	executor.ExecutorStore
 	GetSeeds() ([]*model.PeerSpec, error)
 	UpsertSeeds([]string) error
 	GetPeers() ([]*model.PeerSpec, error)
@@ -86,6 +100,7 @@ type peer struct {
 	server             *http3.Server
 	client             *http.Client
 	notifyPendingPeers chan string
+	actionQueue        chan Action
 	quit               chan struct{}
 	remoteAddr         string
 	nodeType           NodeType
@@ -97,6 +112,10 @@ func NewSeed(host string, port int, store peerStore, logger *slog.Logger) (*peer
 
 func NewPeer(host string, port int, store peerStore, logger *slog.Logger) (*peer, error) {
 	return new(host, port, store, logger, NodeTypePeer)
+}
+
+func NewCache(host string, port int, store peerStore, logger *slog.Logger) (*peer, error) {
+	return new(host, port, store, logger, NodeTypeCache)
 }
 
 func new(host string, port int, store peerStore, logger *slog.Logger, nodeType NodeType) (*peer, error) {
@@ -113,6 +132,7 @@ func new(host string, port int, store peerStore, logger *slog.Logger, nodeType N
 		logger:             logger,
 		nodeType:           nodeType,
 		notifyPendingPeers: make(chan string),
+		actionQueue:        make(chan Action),
 		quit:               make(chan struct{}),
 	}
 
@@ -125,12 +145,18 @@ func new(host string, port int, store peerStore, logger *slog.Logger, nodeType N
 
 func (p *peer) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /subscription", p.handleCreateSubscription)
-	mux.HandleFunc("DELETE /subscription", p.handleDeleteSubscription)
-	mux.HandleFunc("POST /subscription/peer", p.handleSubscriptionPeerUpdate)
-	mux.HandleFunc("POST /action", p.handleCreateAction)
-	mux.HandleFunc("POST /ping", p.handlePing)
-	mux.HandleFunc("POST /pong", p.handlePong)
+	switch p.nodeType {
+	case NodeTypeSeed:
+		fallthrough
+	case NodeTypePeer:
+		mux.HandleFunc("POST /subscription", p.handleCreateSubscription)
+		mux.HandleFunc("DELETE /subscription", p.handleDeleteSubscription)
+		mux.HandleFunc("POST /subscription/peer", p.handleSubscriptionPeerUpdate)
+		mux.HandleFunc("POST /ping", p.handlePing)
+		mux.HandleFunc("POST /pong", p.handlePong)
+	case NodeTypeCache:
+		mux.HandleFunc("POST /action", p.handleCreateAction)
+	}
 	return mux
 }
 
@@ -198,6 +224,8 @@ func (p *peer) Run() error {
 		return p.runLoopPeer()
 	case NodeTypeSeed:
 		return p.runLoopSeed()
+	case NodeTypeCache:
+		return p.runLoopCache()
 	}
 
 	return nil
@@ -257,6 +285,40 @@ func (p *peer) runLoopSeed() error {
 			return nil
 		}
 	}
+}
+
+func (p *peer) runLoopCache() error {
+	dispatchQueue := make(chan any)
+
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for a := range dispatchQueue {
+			fmt.Println(a)
+		}
+	}()
+
+outer:
+	for {
+		select {
+		case action := <-p.actionQueue:
+			e := executor.New(action.Command, p.store, p.logger)
+			res, err := e.Execute()
+			if err != nil {
+				p.logger.Error("executing action", "error", err)
+				continue
+			}
+			dispatchQueue <- res
+		case <-p.quit:
+			break outer
+		}
+	}
+
+	close(dispatchQueue)
+	wg.Wait()
+
+	return nil
 }
 
 func (p *peer) Close() error {
@@ -466,7 +528,8 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		p.logger.Error("reading body", "error", err)
 	}
 
-	id := req.Header.Get(HeaderActionID)
+	id := gonanoid.Must()
+	nodeID := req.Header.Get(HeaderNodeID)
 	// TODO check signature
 	action := string(buf)
 
@@ -479,7 +542,25 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		p.logger.Error("storing action", "error", err, "id", id, "action", action)
 	}
 
-	// TODO process action
+	parser, err := ast.Parse(action)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, err := w.Write([]byte("syntax error: " + err.Error()))
+		if err != nil {
+			p.logger.Error("sending response", "error", err)
+		}
+		return
+	}
+
+	p.actionQueue <- Action{
+		ID:         id,
+		Timestamp:  time.Now().UTC(),
+		NodeID:     nodeID,
+		RemoteAddr: p.remoteAddr,
+		Action:     action,
+		Command:    parser.Command(),
+	}
+
 	p.logger.Info("action", "id", id, "action", action)
 
 	w.WriteHeader(http.StatusAccepted)

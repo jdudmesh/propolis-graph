@@ -28,7 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func setup(t *testing.T) (store, *slog.Logger) {
+func setup(t *testing.T) (ExecutorStore, *slog.Logger) {
 	opts := &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}
@@ -56,9 +56,8 @@ func TestExecutorCRUD(t *testing.T) {
 
 	ids := []string{}
 	t.Run("create", func(t *testing.T) {
-		e, err := New(p.Command(), store, logger)
+		e := New(p.Command(), store, logger)
 		assert.NotNil(e)
-		assert.NoError(err)
 
 		res, err := e.Execute()
 		assert.NoError(err)
@@ -71,9 +70,8 @@ func TestExecutorCRUD(t *testing.T) {
 
 	t.Run("update", func(t *testing.T) {
 		// make sure previous insert found
-		e, err := New(p.Command(), store, logger)
+		e := New(p.Command(), store, logger)
 		assert.NotNil(e)
-		assert.NoError(err)
 
 		res, err := e.Execute()
 		assert.NoError(err)
@@ -95,9 +93,8 @@ func TestExecutorSearch(t *testing.T) {
 	p, err := ast.Parse(testStmt1)
 	assert.NoError(err)
 
-	e, err := New(p.Command(), store, logger)
+	e := New(p.Command(), store, logger)
 	assert.NotNil(e)
-	assert.NoError(err)
 
 	_, err = e.Execute()
 	assert.NoError(err)
@@ -110,9 +107,8 @@ func TestExecutorSearch(t *testing.T) {
 		assert.NoError(err)
 		assert.NotNil(p.Command())
 
-		e, err := New(p.Command(), store, logger)
+		e := New(p.Command(), store, logger)
 		assert.NotNil(e)
-		assert.NoError(err)
 
 		res, err := e.Execute()
 		assert.NoError(err)
