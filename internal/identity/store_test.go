@@ -9,7 +9,8 @@ import (
 func TestStore(t *testing.T) {
 	assert := assert.New(t)
 
-	store, err := NewStore()
+	databaseUrl := "file::memory:?cache=shared"
+	store, err := NewStore(databaseUrl)
 	assert.NoError(err)
 	assert.NotNil(store)
 }

@@ -4,7 +4,6 @@ go 1.22.0
 
 require (
 	github.com/go-sql-driver/mysql v1.8.1
-	github.com/golang-migrate/migrate v3.5.4+incompatible
 	github.com/golang-migrate/migrate/v4 v4.17.1
 	github.com/jdudmesh/migrate v0.0.0-00010101000000-000000000000
 	github.com/jmoiron/sqlx v1.4.0
@@ -18,6 +17,8 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
+	github.com/OneOfOne/xxhash v1.2.8 // indirect
+	github.com/btcsuite/btcutil v1.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
@@ -53,4 +54,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/jdudmesh/migrate => ../migrate
+replace "github.com/golang-migrate/migrate/v4" => ../migrate

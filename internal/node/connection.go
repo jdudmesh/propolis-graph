@@ -19,11 +19,14 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -52,6 +55,7 @@ const (
 	HeaderNodeID       = "x-propolis-node-id"
 	HeaderSender       = "x-propolis-sender"
 	HeaderSignature    = "x-propolis-signature"
+	HeaderIdentifier   = "x-propolis-identifier"
 
 	SelfRemoteAddress = "0.0.0.0"
 )
@@ -88,6 +92,7 @@ type peerStore interface {
 	DeleteSubs(remoteAddr string, subs []string) error
 	FindPeersBySub(sub string) ([]*model.PeerSpec, error)
 	AddAction(id, action, remoteAddr string) error
+	GetCertificate(identifier string) (x509.Certificate, error)
 }
 
 type peer struct {
@@ -528,18 +533,51 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		p.logger.Error("reading body", "error", err)
 	}
 
-	id := gonanoid.Must()
+	identifier := req.Header.Get(HeaderIdentifier)
+	actionID := req.Header.Get(HeaderActionID)
+	encodedSig := req.Header.Get(HeaderSignature)
 	nodeID := req.Header.Get(HeaderNodeID)
-	// TODO check signature
 	action := string(buf)
 
-	err = p.store.AddAction(id, action, req.RemoteAddr)
+	sig, err := base64.StdEncoding.DecodeString(encodedSig)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+
+	// TODO: if certificate is not found, fetch it from the sender
+	cert, err := p.store.GetCertificate(identifier)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			p.logger.Error("getting certificate", "error", err, "id", identifier)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}
+
+	h := sha256.New()
+	h.Write([]byte(cert.Issuer.CommonName))
+	h.Write([]byte(actionID))
+	h.Write([]byte(action))
+
+	if ed25519PublicKey, ok := cert.PublicKey.(ed25519.PublicKey); ok {
+		if !ed25519.Verify(ed25519PublicKey, h.Sum(nil), sig) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	} else {
+		p.logger.Error("unsupported public key type")
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = p.store.AddAction(actionID, action, req.RemoteAddr)
 	if err != nil {
 		if errors.Is(err, model.ErrAlreadyExists) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		p.logger.Error("storing action", "error", err, "id", id, "action", action)
+		p.logger.Error("storing action", "error", err, "identifier", cert.Issuer.CommonName, "id", actionID, "action", action)
 	}
 
 	parser, err := ast.Parse(action)

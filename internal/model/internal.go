@@ -22,6 +22,7 @@ import (
 )
 
 var ErrAlreadyExists = errors.New("entity already exists")
+var ErrNotFound = errors.New("entity not found")
 
 type HubSpec struct {
 	CreatedAt time.Time  `db:"created_at"`

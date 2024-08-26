@@ -2,12 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
+	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/node"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
@@ -41,13 +49,62 @@ func main() {
 		Transport: roundTripper,
 	}
 
-	err = sendFolders(db)
+	cwd := os.Getenv("WORKSPACE_DIR")
+	databaseUrl := fmt.Sprintf("file:%s/data/identity.db?mode=rwc&_secure_delete=true", cwd)
+	store, err := identity.NewStore(databaseUrl)
+	if err != nil {
+		panic(err)
+	}
+
+	svc, err := identity.NewService(store)
+	if err != nil {
+		panic(err)
+	}
+
+	id, err := svc.GetPrimaryIdentity()
+	if err != nil {
+		panic(err)
+	}
+
+	err = sendIdentity(id)
+	if err != nil {
+		panic(err)
+	}
+
+	err = sendFolders(id, db)
 	if err != nil {
 		slog.Error("folders", "error", err)
 	}
 }
 
-func sendFolders(db *sqlx.DB) error {
+func sendIdentity(id *identity.Identity) error {
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.Certificate}))
+	certPEMEncoded, err := json.Marshal(certPEM)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(certPEMEncoded))
+
+	sb := strings.Builder{}
+	sb.WriteString("MERGE (:Identity{")
+	props := []string{
+		fmt.Sprintf("id:'%s'", id.Identifier),
+		fmt.Sprintf("handle:'%s'", id.Handle),
+		fmt.Sprintf("bio:'%s'", id.Bio),
+		fmt.Sprintf("certificate:'%s'", string(certPEMEncoded)),
+	}
+	sb.WriteString(strings.Join(props, ", "))
+	sb.WriteString("})")
+
+	err = postAction(id, sb.String())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func sendFolders(id *identity.Identity, db *sqlx.DB) error {
 	rows, err := db.Queryx("select id, description from folder limit 1")
 	if err != nil {
 		return err
@@ -62,7 +119,7 @@ func sendFolders(db *sqlx.DB) error {
 		}
 
 		action := fmt.Sprintf("MERGE (:Tag{extId:'%d', value:'%s'})", f.ID, f.Description)
-		err = postAction(action)
+		err = postAction(id, action)
 		if err != nil {
 			return err
 		}
@@ -71,7 +128,7 @@ func sendFolders(db *sqlx.DB) error {
 	return nil
 }
 
-func postAction(action string) error {
+func postAction(id *identity.Identity, action string) error {
 	ctx := context.Background()
 
 	stm := strings.NewReader(action)
@@ -79,8 +136,32 @@ func postAction(action string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Add(node.HeaderActionID, "")
+
+	var privateKey ed25519.PrivateKey
+	for _, key := range id.Keys {
+		if key.Type == identity.KeyTypeED25519PrivateKey {
+			privateKey = key.Data
+			break
+		}
+	}
+	if privateKey == nil {
+		log.Fatalf("No private key found")
+	}
+
+	actionID := gonanoid.Must()
+	h := sha256.New()
+	h.Write([]byte(id.Identifier))
+	h.Write([]byte(actionID))
+	h.Write([]byte(action))
+	sig := ed25519.Sign(privateKey, h.Sum(nil))
+
+	encodedSig := base64.StdEncoding.EncodeToString(sig)
+	log.Printf("Signature: %s", encodedSig)
+
+	req.Header.Add(node.HeaderIdentifier, id.Identifier)
+	req.Header.Add(node.HeaderActionID, actionID)
 	req.Header.Add(node.HeaderNodeID, nodeID)
+	req.Header.Add(node.HeaderSignature, encodedSig)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
