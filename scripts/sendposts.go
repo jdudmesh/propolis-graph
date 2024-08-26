@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/node"
 	gonanoid "github.com/matoous/go-nanoid/v2"
@@ -27,6 +28,11 @@ import (
 
 var httpClient *http.Client
 var nodeID string
+
+type Peer interface {
+	SendIdentity(id *identity.Identity) error
+	SendAction(id *identity.Identity, action string) error
+}
 
 func main() {
 	nodeID = gonanoid.Must()
@@ -66,7 +72,12 @@ func main() {
 		panic(err)
 	}
 
-	err = sendIdentity(id)
+	peer, err := createPeer()
+	if err != nil {
+		panic(err)
+	}
+
+	err = peer.SendIdentity(id)
 	if err != nil {
 		panic(err)
 	}
@@ -77,8 +88,25 @@ func main() {
 	}
 }
 
-func sendIdentity(id *identity.Identity) error {
-	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.Certificate}))
+func createPeer() (Peer, error) {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
+
+	dbConn := "file::memory:?cache=shared"
+	migrationsDir := "./migrations"
+	stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, []string{"127.0.0.1:9000"}, []string{})
+	if err != nil {
+		slog.Error("store init", "error", err)
+		panic("unable to init state store")
+	}
+
+	return node.NewPeer("127.0.0.1", 9001, stateStore, logger)
+}
+
+func sendIdentity(peer Peer, id *identity.Identity) error {
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.CertificateData}))
 	certPEMEncoded, err := json.Marshal(certPEM)
 	if err != nil {
 		panic(err)

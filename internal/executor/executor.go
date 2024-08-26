@@ -35,29 +35,24 @@ var (
 	ErrNotFound = errors.New("not found")
 )
 
-type ExecutorStore interface {
-	CreateTx(ctx context.Context) (*sqlx.Tx, error)
-}
-
 type executor struct {
-	stmt   any
-	store  ExecutorStore
+	store  *store
 	logger *slog.Logger
 }
 
-func New(stmt any, s ExecutorStore, logger *slog.Logger) *executor {
+func New(databaseURL string, logger *slog.Logger) (*executor, error) {
+	s, err := newStore(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("creating store: %w", err)
+	}
+
 	return &executor{
-		stmt:   stmt,
 		logger: logger,
 		store:  s,
-	}
+	}, nil
 }
 
-func (e *executor) Execute() (any, error) {
-	if e.stmt == nil {
-		return nil, errors.New("no command found")
-	}
-
+func (e *executor) Execute(stmt any) (any, error) {
 	ctx, cancelFn := context.WithTimeout(context.Background(), 86400*time.Second)
 	defer cancelFn()
 
@@ -67,7 +62,7 @@ func (e *executor) Execute() (any, error) {
 	}
 
 	var res any
-	if cmd, ok := e.stmt.(ast.Command); ok {
+	if cmd, ok := stmt.(ast.Command); ok {
 		switch cmd.Type() {
 		case ast.EntityTypeMergeCmd:
 			res, err = e.finaliseMergeCmd(cmd, tx)
@@ -77,7 +72,7 @@ func (e *executor) Execute() (any, error) {
 			return nil, fmt.Errorf("unknown command: %v", cmd)
 		}
 	} else {
-		return nil, fmt.Errorf("unexpected entity: %v", e.stmt)
+		return nil, fmt.Errorf("unexpected entity: %v", stmt)
 	}
 
 	if err != nil {

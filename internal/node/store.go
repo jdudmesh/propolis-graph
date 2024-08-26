@@ -14,13 +14,18 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
-package datastore
+package node
 
 import (
 	"context"
+	"crypto/x509"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -28,11 +33,11 @@ import (
 
 const defaultTimeout = 10 * time.Second
 
-type internalStateStore struct {
+type store struct {
 	db *sqlx.DB
 }
 
-func NewInternalState(databaseURL, migrationsDir string, seeds, subs []string) (*internalStateStore, error) {
+func newStore(databaseURL, migrationsDir string) (*store, error) {
 	db, err := sqlx.Connect("sqlite3", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
@@ -43,24 +48,36 @@ func NewInternalState(databaseURL, migrationsDir string, seeds, subs []string) (
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
 
-	store := &internalStateStore{
+	store := &store{
 		db,
-	}
-
-	err = store.UpsertSeeds(seeds)
-	if err != nil {
-		return nil, fmt.Errorf("creating store: %w", err)
-	}
-
-	err = store.initSubs(subs)
-	if err != nil {
-		return nil, fmt.Errorf("creating store: %w", err)
 	}
 
 	return store, nil
 }
 
-func (s *internalStateStore) UpsertSeeds(seeds []string) error {
+func createSchema(db *sqlx.DB, migrationsDir string) error {
+	driver, err := sqlite3.WithInstance(db.DB, &sqlite3.Config{})
+	if err != nil {
+		return fmt.Errorf("creating driver: %w", err)
+	}
+
+	m, err := migrate.NewWithDatabaseInstance(
+		"file://"+migrationsDir,
+		"sqlite3", driver)
+
+	if err != nil {
+		return fmt.Errorf("creating migration: %w", err)
+	}
+
+	err = m.Up()
+	if !errors.Is(err, migrate.ErrNoChange) {
+		return err
+	}
+
+	return nil
+}
+
+func (s *store) UpsertSeeds(seeds []string) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -97,7 +114,7 @@ func (s *internalStateStore) UpsertSeeds(seeds []string) error {
 	return nil
 }
 
-func (s *internalStateStore) initSubs(subs []string) error {
+func (s *store) InitSubs(subs []string) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -139,7 +156,7 @@ func (s *internalStateStore) initSubs(subs []string) error {
 	return nil
 }
 
-func (s *internalStateStore) GetSeeds() ([]*model.PeerSpec, error) {
+func (s *store) GetSeeds() ([]*model.PeerSpec, error) {
 	rows, err := s.db.Queryx(`select * from seeds`)
 	if err != nil {
 		return nil, fmt.Errorf("querying seeds: %w", err)
@@ -159,7 +176,7 @@ func (s *internalStateStore) GetSeeds() ([]*model.PeerSpec, error) {
 	return peers, nil
 }
 
-func (s *internalStateStore) GetPeers() ([]*model.PeerSpec, error) {
+func (s *store) GetPeers() ([]*model.PeerSpec, error) {
 	rows, err := s.db.Queryx(`select * from peers`)
 	if err != nil {
 		return nil, fmt.Errorf("querying peers: %w", err)
@@ -179,7 +196,7 @@ func (s *internalStateStore) GetPeers() ([]*model.PeerSpec, error) {
 	return peers, nil
 }
 
-func (s *internalStateStore) UpsertPeersForSub(sub string, peers []string) error {
+func (s *store) UpsertPeersForSub(sub string, peers []string) error {
 	existing, err := s.FindPeersBySub(sub)
 	if err != nil {
 		return fmt.Errorf("upsert peers/subs (finding existing): %w", err)
@@ -238,7 +255,7 @@ func (s *internalStateStore) UpsertPeersForSub(sub string, peers []string) error
 	return nil
 }
 
-func (s *internalStateStore) GetSelfSubs() ([]*model.SubscriptionSpec, error) {
+func (s *store) GetSelfSubs() ([]*model.SubscriptionSpec, error) {
 	rows, err := s.db.Queryx(`select * from local_subs`)
 	if err != nil {
 		return nil, fmt.Errorf("querying subs: %w", err)
@@ -258,7 +275,7 @@ func (s *internalStateStore) GetSelfSubs() ([]*model.SubscriptionSpec, error) {
 	return subs, nil
 }
 
-func (s *internalStateStore) FindSubsByRemoteAddr(remoteAddr string) ([]*model.SubscriptionSpec, error) {
+func (s *store) FindSubsByRemoteAddr(remoteAddr string) ([]*model.SubscriptionSpec, error) {
 	rows, err := s.db.Queryx(`select * from subs where remote_addr = ?`, remoteAddr)
 
 	if err != nil {
@@ -279,7 +296,7 @@ func (s *internalStateStore) FindSubsByRemoteAddr(remoteAddr string) ([]*model.S
 	return subs, nil
 }
 
-func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error {
+func (s *store) UpsertSubs(remoteAddr string, subs []string) error {
 	existing, err := s.FindSubsByRemoteAddr(remoteAddr)
 	if err != nil {
 		return fmt.Errorf("upsert subs (finding existing): %w", err)
@@ -338,7 +355,7 @@ func (s *internalStateStore) UpsertSubs(remoteAddr string, subs []string) error 
 	return nil
 }
 
-func (s *internalStateStore) DeleteSubs(remoteAddr string, subs []string) error {
+func (s *store) DeleteSubs(remoteAddr string, subs []string) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -363,7 +380,7 @@ func (s *internalStateStore) DeleteSubs(remoteAddr string, subs []string) error 
 	return nil
 }
 
-func (s *internalStateStore) FindPeersBySub(sub string) ([]*model.PeerSpec, error) {
+func (s *store) FindPeersBySub(sub string) ([]*model.PeerSpec, error) {
 	rows, err := s.db.Queryx(`
 		select p.*
 		from subs s
@@ -389,7 +406,7 @@ func (s *internalStateStore) FindPeersBySub(sub string) ([]*model.PeerSpec, erro
 	return peers, nil
 }
 
-func (s *internalStateStore) AddAction(id, action, remoteAddr string) error {
+func (s *store) AddAction(id, action, remoteAddr string) error {
 	_, err := s.db.Exec(`
 		insert into actions (id, created_at, action, remote_addr)
 		values(?, ?, ?, ?)
@@ -397,7 +414,7 @@ func (s *internalStateStore) AddAction(id, action, remoteAddr string) error {
 	return err
 }
 
-func (s *internalStateStore) AddPendingPeer(remoteAddr string, sub string) error {
+func (s *store) AddPendingPeer(remoteAddr string, sub string) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`insert into pending_subs(
 		remote_addr,
@@ -413,7 +430,7 @@ func (s *internalStateStore) AddPendingPeer(remoteAddr string, sub string) error
 	return nil
 }
 
-func (s *internalStateStore) RemovePendingPeer(remoteAddr string, sub string) error {
+func (s *store) RemovePendingPeer(remoteAddr string, sub string) error {
 	_, err := s.db.Exec(`delete from pending_subs where remote_addr = ? and spec = ?`, remoteAddr, sub)
 	if err != nil {
 		return fmt.Errorf("delete pending_subs: %w", err)
@@ -421,7 +438,7 @@ func (s *internalStateStore) RemovePendingPeer(remoteAddr string, sub string) er
 	return nil
 }
 
-func (s *internalStateStore) GetPendingPeersForSub(sub string) ([]*model.SubscriptionSpec, error) {
+func (s *store) GetPendingPeersForSub(sub string) ([]*model.SubscriptionSpec, error) {
 	rows, err := s.db.Queryx(`
 		select *
 		from pending_subs
@@ -445,7 +462,7 @@ func (s *internalStateStore) GetPendingPeersForSub(sub string) ([]*model.Subscri
 	return peers, nil
 }
 
-func (s *internalStateStore) TouchPeer(remoteAddr string) error {
+func (s *store) TouchPeer(remoteAddr string) error {
 	now := time.Now().UTC()
 	_, err := s.db.Exec(`update peers set updated_at = ? where remote_addr = ?`, now, remoteAddr)
 	if err != nil {
@@ -454,10 +471,46 @@ func (s *internalStateStore) TouchPeer(remoteAddr string) error {
 	return nil
 }
 
-func (s *internalStateStore) CreateTx(ctx context.Context) (*sqlx.Tx, error) {
+func (s *store) CreateTx(ctx context.Context) (*sqlx.Tx, error) {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create tx: %w", err)
 	}
 	return tx, nil
+}
+
+func (s *store) PutCachedCertificate(cert *x509.Certificate) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`insert into certificate_cache (identifier, created_at, certificate)
+		values (?, ?, ?)
+		on conflict(identifier) do update
+		set updated_at = ?, certificate = ?`,
+		cert.Subject.CommonName,
+		now,
+		cert.Raw,
+		now,
+		cert.Raw)
+	if err != nil {
+		return fmt.Errorf("put cached certificate: %w", err)
+	}
+
+	return nil
+}
+
+func (s *store) GetCachedCertificate(identifier string) (*x509.Certificate, error) {
+	certData := []byte{}
+	err := s.db.Get(&certData, `select * from certificate_cache where identifier = ?`, identifier)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, model.ErrNotFound
+		}
+		return nil, fmt.Errorf("get cached certificate: %w", err)
+	}
+
+	cert, err := x509.ParseCertificate(certData)
+	if err != nil {
+		return nil, fmt.Errorf("parsing certificate: %w", err)
+	}
+
+	return cert, nil
 }

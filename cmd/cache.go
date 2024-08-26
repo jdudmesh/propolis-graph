@@ -19,7 +19,6 @@ package cmd
 import (
 	"sync"
 
-	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
 )
@@ -31,38 +30,38 @@ var cacheCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		host, err := cmd.Flags().GetString("host")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		port, err := cmd.Flags().GetInt("port")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
-		dbConn, err := cmd.Flags().GetString("db")
+		databaseURL, err := cmd.Flags().GetString("db")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		migrationsDir, err := cmd.Flags().GetString("migrations")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		seeds, err := cmd.Flags().GetStringArray("seed")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
-		stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, seeds, []string{})
-		if err != nil {
-			logger.Error("store init", "error", err)
-			panic("unable to init state store")
-		}
-
-		h, err := node.NewCache(host, port, stateStore, logger)
+		h, err := node.NewCache(host, port, databaseURL, migrationsDir, logger)
 		if err != nil {
 			logger.Error("creating peer", "error", err)
+			return
+		}
+
+		err = h.SetInitialSeeds(seeds)
+		if err != nil {
+			logger.Error("setting initial seeds", "error", err)
 			return
 		}
 

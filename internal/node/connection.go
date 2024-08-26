@@ -36,11 +36,13 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jdudmesh/propolis/internal/ast"
 	"github.com/jdudmesh/propolis/internal/executor"
+	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/model"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
@@ -68,38 +70,25 @@ const (
 	NodeTypeCache
 )
 
-type Action struct {
-	ID         string
-	RemoteAddr string
-	NodeID     string
-	Timestamp  time.Time
-	Action     string
-	Command    ast.Command
+type Executor interface {
+	Execute(stmt any) (any, error)
 }
 
-type peerStore interface {
-	executor.ExecutorStore
-	GetSeeds() ([]*model.PeerSpec, error)
-	UpsertSeeds([]string) error
-	GetPeers() ([]*model.PeerSpec, error)
-	TouchPeer(remoteAddr string) error
-	UpsertPeersForSub(sub string, peers []string) error
-	AddPendingPeer(remoteAddr string, sub string) error
-	RemovePendingPeer(remoteAddr string, sub string) error
-	GetPendingPeersForSub(sub string) ([]*model.SubscriptionSpec, error)
-	GetSelfSubs() ([]*model.SubscriptionSpec, error)
-	UpsertSubs(remoteAddr string, subs []string) error
-	DeleteSubs(remoteAddr string, subs []string) error
-	FindPeersBySub(sub string) ([]*model.PeerSpec, error)
-	AddAction(id, action, remoteAddr string) error
-	GetCertificate(identifier string) (x509.Certificate, error)
+type Action struct {
+	ID          string
+	RemoteAddr  string
+	NodeID      string
+	Timestamp   time.Time
+	Action      string
+	Command     ast.Command
+	Certificate x509.Certificate
 }
 
 type peer struct {
 	nodeID             string
 	host               string
 	port               int
-	store              peerStore
+	store              *store
 	logger             *slog.Logger
 	roundTripper       *http3.RoundTripper
 	server             *http3.Server
@@ -109,21 +98,32 @@ type peer struct {
 	quit               chan struct{}
 	remoteAddr         string
 	nodeType           NodeType
+	executor           Executor
 }
 
-func NewSeed(host string, port int, store peerStore, logger *slog.Logger) (*peer, error) {
-	return new(host, port, store, logger, NodeTypeSeed)
+func NewSeed(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger) (*peer, error) {
+	return new(host, port, databaseURL, migrationsDir, logger, NodeTypeSeed)
 }
 
-func NewPeer(host string, port int, store peerStore, logger *slog.Logger) (*peer, error) {
-	return new(host, port, store, logger, NodeTypePeer)
+func NewPeer(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger) (*peer, error) {
+	return new(host, port, databaseURL, migrationsDir, logger, NodeTypePeer)
 }
 
-func NewCache(host string, port int, store peerStore, logger *slog.Logger) (*peer, error) {
-	return new(host, port, store, logger, NodeTypeCache)
+func NewCache(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger) (*peer, error) {
+	return new(host, port, databaseURL, migrationsDir, logger, NodeTypeCache)
 }
 
-func new(host string, port int, store peerStore, logger *slog.Logger, nodeType NodeType) (*peer, error) {
+func new(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger, nodeType NodeType) (*peer, error) {
+	store, err := newStore(databaseURL, migrationsDir)
+	if err != nil {
+		return nil, fmt.Errorf("creating store: %w", err)
+	}
+
+	executor, err := executor.New(databaseURL, logger)
+	if err != nil {
+		return nil, fmt.Errorf("creating executor: %w", err)
+	}
+
 	nodeID, err := gonanoid.New()
 	if err != nil {
 		return nil, fmt.Errorf("generating node id: %w", err)
@@ -136,6 +136,7 @@ func new(host string, port int, store peerStore, logger *slog.Logger, nodeType N
 		store:              store,
 		logger:             logger,
 		nodeType:           nodeType,
+		executor:           executor,
 		notifyPendingPeers: make(chan string),
 		actionQueue:        make(chan Action),
 		quit:               make(chan struct{}),
@@ -146,6 +147,14 @@ func new(host string, port int, store peerStore, logger *slog.Logger, nodeType N
 	}
 
 	return p, nil
+}
+
+func (p *peer) SetInitialSeeds(seeds []string) error {
+	return p.store.UpsertSeeds(seeds)
+}
+
+func (p *peer) SetInitialSubscriptions(subs []string) error {
+	return p.store.InitSubs(subs)
 }
 
 func (p *peer) newServeMux() *http.ServeMux {
@@ -159,6 +168,7 @@ func (p *peer) newServeMux() *http.ServeMux {
 		mux.HandleFunc("POST /subscription/peer", p.handleSubscriptionPeerUpdate)
 		mux.HandleFunc("POST /ping", p.handlePing)
 		mux.HandleFunc("POST /pong", p.handlePong)
+		mux.HandleFunc("GER /certificate/{id}", p.handleGetCertificate)
 	case NodeTypeCache:
 		mux.HandleFunc("POST /action", p.handleCreateAction)
 	}
@@ -294,6 +304,7 @@ func (p *peer) runLoopSeed() error {
 
 func (p *peer) runLoopCache() error {
 	dispatchQueue := make(chan any)
+	defer close(dispatchQueue)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
@@ -308,8 +319,8 @@ outer:
 	for {
 		select {
 		case action := <-p.actionQueue:
-			e := executor.New(action.Command, p.store, p.logger)
-			res, err := e.Execute()
+
+			res, err := p.executor.Execute(action.Command)
 			if err != nil {
 				p.logger.Error("executing action", "error", err)
 				continue
@@ -533,7 +544,7 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		p.logger.Error("reading body", "error", err)
 	}
 
-	identifier := req.Header.Get(HeaderIdentifier)
+	identity := req.Header.Get(HeaderIdentifier)
 	actionID := req.Header.Get(HeaderActionID)
 	encodedSig := req.Header.Get(HeaderSignature)
 	nodeID := req.Header.Get(HeaderNodeID)
@@ -545,14 +556,19 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// TODO: if certificate is not found, fetch it from the sender
-	cert, err := p.store.GetCertificate(identifier)
+	cert, err := p.store.GetCachedCertificate(identity)
 	if err != nil {
 		if !errors.Is(err, model.ErrNotFound) {
-			p.logger.Error("getting certificate", "error", err, "id", identifier)
+			p.logger.Error("getting certificate", "error", err, "id", identity)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		w.WriteHeader(http.StatusUnauthorized)
+		cert, err = p.requestCertificate(identity, req.RemoteAddr)
+		if err != nil {
+			p.logger.Error("fetching certificate", "error", err, "id", identity)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 	}
 
 	h := sha256.New()
@@ -591,15 +607,16 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 	}
 
 	p.actionQueue <- Action{
-		ID:         id,
-		Timestamp:  time.Now().UTC(),
-		NodeID:     nodeID,
-		RemoteAddr: p.remoteAddr,
-		Action:     action,
-		Command:    parser.Command(),
+		ID:          actionID,
+		Timestamp:   time.Now().UTC(),
+		NodeID:      nodeID,
+		RemoteAddr:  p.remoteAddr,
+		Certificate: *cert,
+		Action:      action,
+		Command:     parser.Command(),
 	}
 
-	p.logger.Info("action", "id", id, "action", action)
+	p.logger.Info("action", "id", actionID, "action", action)
 
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -862,7 +879,64 @@ func (p *peer) generateTLSConfig() *tls.Config {
 	}
 }
 
-func (p *peer) SendAction(action string) error {
+func (p *peer) SendIdentity(id *identity.Identity) error {
+	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.CertificateData}))
+	certPEMEncoded, err := json.Marshal(certPEM)
+	if err != nil {
+		return fmt.Errorf("marshalling certificate: %w", err)
+	}
+
+	sb := strings.Builder{}
+	sb.WriteString("MERGE (:Identity{")
+	props := []string{
+		fmt.Sprintf("id:'%s'", id.Identifier),
+		fmt.Sprintf("handle:'%s'", id.Handle),
+		fmt.Sprintf("bio:'%s'", id.Bio),
+		fmt.Sprintf("certificate:'%s'", string(certPEMEncoded)),
+	}
+	sb.WriteString(strings.Join(props, ", "))
+	sb.WriteString("})")
+
+	err = p.SendAction(id, sb.String())
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (p *peer) SendAction(id *identity.Identity, action string) error {
+	var privateKey ed25519.PrivateKey
+	for _, key := range id.Keys {
+		if key.Type == identity.KeyTypeED25519PrivateKey {
+			privateKey = key.Data
+			break
+		}
+	}
+	if privateKey == nil {
+		return fmt.Errorf("private key not found")
+	}
+
+	cert, err := x509.ParseCertificate(id.CertificateData)
+	if err != nil {
+		return fmt.Errorf("parsing certificate: %w", err)
+	}
+	p.store.PutCachedCertificate(cert)
+
+	actionID := gonanoid.Must()
+
+	h := sha256.New()
+	h.Write([]byte(id.Identifier))
+	h.Write([]byte(actionID))
+	h.Write([]byte(action))
+	sig := ed25519.Sign(privateKey, h.Sum(nil))
+	encodedSig := base64.StdEncoding.EncodeToString(sig)
+
+	buf := bytes.NewBufferString(action)
+
+	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelFn()
+
 	peers, err := p.store.GetPeers()
 	if err != nil {
 		return fmt.Errorf("getting peers: %w", err)
@@ -872,20 +946,10 @@ func (p *peer) SendAction(action string) error {
 		return fmt.Errorf("no peers available")
 	}
 
-	id, err := gonanoid.New()
-	if err != nil {
-		return fmt.Errorf("send action: generating id: %w", err)
-	}
-
-	err = p.store.AddAction(id, action, SelfRemoteAddress)
+	err = p.store.AddAction(actionID, action, SelfRemoteAddress)
 	if err != nil {
 		return fmt.Errorf("send action: saving action: %w", err)
 	}
-
-	buf := bytes.NewBufferString(action)
-
-	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelFn()
 
 	wg := sync.WaitGroup{}
 	for _, peer := range peers {
@@ -901,9 +965,10 @@ func (p *peer) SendAction(action string) error {
 
 			url := fmt.Sprintf("https://%s/action", peer.RemoteAddr)
 			req, err := http.NewRequestWithContext(ctxInner, "POST", url, buf)
-			req.Header.Add(HeaderActionID, id)
-			req.Header.Add(HeaderSender, "TODO")
-			req.Header.Add(HeaderSignature, "TODO")
+			req.Header.Add(HeaderIdentifier, id.Identifier)
+			req.Header.Add(HeaderActionID, actionID)
+			req.Header.Add(HeaderNodeID, p.nodeID)
+			req.Header.Add(HeaderSignature, encodedSig)
 
 			if err != nil {
 				p.logger.Error("send action: creating action request", "error", err, "remote", peer.RemoteAddr)
@@ -928,4 +993,68 @@ func (p *peer) SendAction(action string) error {
 	wg.Wait()
 
 	return nil
+}
+
+func (p *peer) handleGetCertificate(w http.ResponseWriter, req *http.Request) {
+	id := req.URL.Query().Get("id")
+	if id == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	p.logger.Info("get certificate", "id", id)
+
+	cert, err := p.store.GetCachedCertificate(id)
+	if err != nil {
+		if errors.Is(err, model.ErrNotFound) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	w.Header().Add(model.ContentTypeHeader, "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
+func (p *peer) requestCertificate(identifier, remoteAddr string) (*x509.Certificate, error) {
+	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelFn()
+
+	url := fmt.Sprintf("https://%s/certificate/%s", remoteAddr, identifier)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating certificate request: %w", err)
+	}
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("executing certificate request: %w", err)
+	}
+
+	body := resp.Body
+	defer body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad certificate response: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, fmt.Errorf("reading certificate response: %w", err)
+	}
+
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("decoding certificate: %w", err)
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing certificate: %w", err)
+	}
+
+	return cert, nil
 }

@@ -15,7 +15,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-const defaultTimeout = 86400 * time.Second
+const defaultTimeout = 10 * time.Second
 
 type store struct {
 	db *sqlx.DB

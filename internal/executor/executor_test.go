@@ -1,3 +1,5 @@
+package executor
+
 /*
 Copyright © 2024 John Dudmesh <john@dudmesh.co.uk>
 
@@ -14,40 +16,18 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
-package executor
 
 import (
 	"fmt"
-	"log/slog"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jdudmesh/propolis/internal/ast"
-	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/stretchr/testify/assert"
 )
 
-func setup(t *testing.T) (ExecutorStore, *slog.Logger) {
-	opts := &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
-
-	cur := os.Getenv("WORKSPACE_DIR")
-	//dbConn := "file::memory:?cache=shared"
-	dbConn := fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cur)
-	store, err := datastore.NewInternalState(dbConn, cur+"/migrations", []string{}, []string{})
-	assert.NoError(t, err)
-	if store == nil {
-		t.Fatal("no store")
-	}
-	return store, logger
-}
-
 func TestExecutorCRUD(t *testing.T) {
 	assert := assert.New(t)
-	store, logger := setup(t)
 
 	testStmt := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
 
@@ -56,10 +36,11 @@ func TestExecutorCRUD(t *testing.T) {
 
 	ids := []string{}
 	t.Run("create", func(t *testing.T) {
-		e := New(p.Command(), store, logger)
+		e, err := New(databaseUrl, logger)
+		assert.NoError(err)
 		assert.NotNil(e)
 
-		res, err := e.Execute()
+		res, err := e.Execute(p.Command())
 		assert.NoError(err)
 		assert.NotNil(p.Command())
 		assert.IsType(&Relation{}, res)
@@ -70,10 +51,11 @@ func TestExecutorCRUD(t *testing.T) {
 
 	t.Run("update", func(t *testing.T) {
 		// make sure previous insert found
-		e := New(p.Command(), store, logger)
+		e, err := New(databaseUrl, logger)
+		assert.NoError(err)
 		assert.NotNil(e)
 
-		res, err := e.Execute()
+		res, err := e.Execute(p.Command())
 		assert.NoError(err)
 		assert.NotNil(res)
 		assert.IsType(&Relation{}, res)
@@ -86,17 +68,17 @@ func TestExecutorCRUD(t *testing.T) {
 
 func TestExecutorSearch(t *testing.T) {
 	assert := assert.New(t)
-	store, logger := setup(t)
 
 	testStmt1 := `MERGE (i:Identity:Person {name: 'john'})-[:posted{ipAddress:'127.0.0.1'}]->(p:Post {uri: 'ipfs://xyz', count: 1, test: 'hello\tworld'})`
 
 	p, err := ast.Parse(testStmt1)
 	assert.NoError(err)
 
-	e := New(p.Command(), store, logger)
+	e, err := New(databaseUrl, logger)
+	assert.NoError(err)
 	assert.NotNil(e)
 
-	_, err = e.Execute()
+	_, err = e.Execute(p.Command())
 	assert.NoError(err)
 
 	now := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
@@ -107,13 +89,13 @@ func TestExecutorSearch(t *testing.T) {
 		assert.NoError(err)
 		assert.NotNil(p.Command())
 
-		e := New(p.Command(), store, logger)
+		e, err := New(databaseUrl, logger)
+		assert.NoError(err)
 		assert.NotNil(e)
 
-		res, err := e.Execute()
+		res, err := e.Execute(p.Command())
 		assert.NoError(err)
 		assert.NotNil(res)
-
 	})
 
 }

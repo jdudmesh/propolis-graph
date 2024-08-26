@@ -17,15 +17,6 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
-	"context"
-	"errors"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
-
-	"github.com/jdudmesh/propolis/internal/activitypub"
-	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/spf13/cobra"
 )
 
@@ -34,70 +25,70 @@ var fedCmd = &cobra.Command{
 	Short: "Propolis ActivityPub integration",
 	Long:  `Run an ActivityPub server`,
 	Run: func(cmd *cobra.Command, args []string) {
-		host, err := cmd.Flags().GetString("host")
-		if err != nil {
-			panic(err)
-		}
+		// host, err := cmd.Flags().GetString("host")
+		// if err != nil {
+		// 	panic(err)
+		// }
 
-		port, err := cmd.Flags().GetInt("port")
-		if err != nil {
-			panic(err)
-		}
+		// port, err := cmd.Flags().GetInt("port")
+		// if err != nil {
+		// 	panic(err)
+		// }
 
-		migrationsDir, err := cmd.Flags().GetString("migrations")
-		if err != nil {
-			panic(err)
-		}
+		// migrationsDir, err := cmd.Flags().GetString("migrations")
+		// if err != nil {
+		// 	panic(err)
+		// }
 
-		dbConn, err := cmd.Flags().GetString("db")
-		if err != nil {
-			panic(err)
-		}
+		// dbConn, err := cmd.Flags().GetString("db")
+		// if err != nil {
+		// 	panic(err)
+		// }
 
-		stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, []string{}, []string{})
-		if err != nil {
-			logger.Error("store init", "error", err)
-			panic("unable to init state store")
-		}
+		// stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, []string{}, []string{})
+		// if err != nil {
+		// 	logger.Error("store init", "error", err)
+		// 	panic("unable to init state store")
+		// }
 
-		h, err := activitypub.NewServer(host, port, stateStore, logger)
-		if err != nil {
-			logger.Error("creating peer", "error", err)
-			return
-		}
+		// h, err := activitypub.NewServer(host, port, stateStore, logger)
+		// if err != nil {
+		// 	logger.Error("creating peer", "error", err)
+		// 	return
+		// }
 
-		ctx, cancelFn := context.WithCancelCause(context.Background())
-		defer cancelFn(errors.New("deferred"))
+		// ctx, cancelFn := context.WithCancelCause(context.Background())
+		// defer cancelFn(errors.New("deferred"))
 
-		wg := sync.WaitGroup{}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			err := h.Run(ctx)
-			if err != nil {
-				logger.Error("starting ActivityPub node", "error", err)
-				panic("unable to start node")
-			}
-		}()
+		// wg := sync.WaitGroup{}
+		// wg.Add(1)
+		// go func() {
+		// 	defer wg.Done()
+		// 	err := h.Run(ctx)
+		// 	if err != nil {
+		// 		logger.Error("starting ActivityPub node", "error", err)
+		// 		panic("unable to start node")
+		// 	}
+		// }()
 
-		go func() {
-			sigint := make(chan os.Signal, 1)
-			signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-			for s := range sigint {
-				switch s {
-				case syscall.SIGHUP:
-					logger.Info("sighup: reloading")
-					err := h.Reload()
-					if err != nil {
-						logger.Error("reloading", "error", err)
-					}
-				case syscall.SIGINT, syscall.SIGTERM:
-					cancelFn(errors.New("received term signal, exiting"))
-				}
-			}
-		}()
+		// go func() {
+		// 	sigint := make(chan os.Signal, 1)
+		// 	signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		// 	for s := range sigint {
+		// 		switch s {
+		// 		case syscall.SIGHUP:
+		// 			logger.Info("sighup: reloading")
+		// 			err := h.Reload()
+		// 			if err != nil {
+		// 				logger.Error("reloading", "error", err)
+		// 			}
+		// 		case syscall.SIGINT, syscall.SIGTERM:
+		// 			cancelFn(errors.New("received term signal, exiting"))
+		// 		}
+		// 	}
+		// }()
 
-		wg.Wait()
+		// wg.Wait()
 	},
 }
 

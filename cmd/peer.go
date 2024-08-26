@@ -18,9 +18,7 @@ package cmd
 
 import (
 	"sync"
-	"time"
 
-	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -33,43 +31,48 @@ var peerCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		host, err := cmd.Flags().GetString("host")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		port, err := cmd.Flags().GetInt("port")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
-		dbConn, err := cmd.Flags().GetString("db")
+		databaseURL, err := cmd.Flags().GetString("db")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		migrationsDir, err := cmd.Flags().GetString("migrations")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		seeds, err := cmd.Flags().GetStringArray("seed")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
 		subs, err := cmd.Flags().GetStringArray("sub")
 		if err != nil {
-			panic(err)
+			panic(err) //TODO: handle error
 		}
 
-		stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, seeds, subs)
-		if err != nil {
-			logger.Error("store init", "error", err)
-			panic("unable to init state store")
-		}
-
-		h, err := node.NewPeer(host, port, stateStore, logger)
+		h, err := node.NewPeer(host, port, databaseURL, migrationsDir, logger)
 		if err != nil {
 			logger.Error("creating peer", "error", err)
+			return
+		}
+
+		err = h.SetInitialSeeds(seeds)
+		if err != nil {
+			logger.Error("setting initial seeds", "error", err)
+			return
+		}
+		err = h.SetInitialSubscriptions(subs)
+		if err != nil {
+			logger.Error("setting initial subscriptions", "error", err)
 			return
 		}
 
@@ -83,18 +86,6 @@ var peerCmd = &cobra.Command{
 				panic("unable to start peer")
 			}
 		}()
-
-		// just testing
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			action := time.Now().Format(time.RFC3339)
-			logger.Info("sending action", "action", action)
-			err := h.SendAction(action)
-			if err != nil {
-				logger.Error("sending action", "error", err)
-			}
-		}
 
 		wg.Wait()
 	},

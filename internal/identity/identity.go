@@ -81,7 +81,7 @@ func (s *identityService) createCredentials(id *Identity) error {
 		return fmt.Errorf("generating certificate: %w", err)
 	}
 
-	id.Certificate = certDER
+	id.CertificateData = certDER
 
 	pubKeyItem := &KeyItem{
 		ID:        gonanoid.Must(),
