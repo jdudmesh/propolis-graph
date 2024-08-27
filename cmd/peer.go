@@ -48,8 +48,8 @@ var peerCmd = &cobra.Command{
 
 		var nodeDatabaseURL, graphDatabaseURL string
 		if isMemory {
-			nodeDatabaseURL = fmt.Sprintf("file:node%d.db?mode=memory&_secure_delete=true", port)
-			graphDatabaseURL = fmt.Sprintf("file:graph%d.db?mode=memory&_secure_delete=true", port)
+			nodeDatabaseURL = fmt.Sprintf("file:node%d.db?mode=memory&cache=shared&_secure_delete=true", port)
+			graphDatabaseURL = fmt.Sprintf("file:graph%d.db?mode=memory&cache=shared&_secure_delete=true", port)
 		} else {
 			nodeDatabaseURL, err = cmd.Flags().GetString("ndb")
 			if err != nil {

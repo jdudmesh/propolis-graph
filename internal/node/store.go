@@ -651,9 +651,9 @@ func (s *store) CreateTx(ctx context.Context) (*sqlx.Tx, error) {
 
 func (s *store) PutCachedCertificate(cert *x509.Certificate) error {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`insert into certificate_cache (identifier, created_at, certificate)
+	_, err := s.db.Exec(`insert into certificate_cache (id, created_at, certificate)
 		values (?, ?, ?)
-		on conflict(identifier) do update
+		on conflict(id) do update
 		set updated_at = ?, certificate = ?`,
 		cert.Subject.CommonName,
 		now,
@@ -669,7 +669,7 @@ func (s *store) PutCachedCertificate(cert *x509.Certificate) error {
 
 func (s *store) GetCachedCertificate(identifier string) (*x509.Certificate, error) {
 	certData := []byte{}
-	err := s.db.Get(&certData, `select * from certificate_cache where identifier = ?`, identifier)
+	err := s.db.Get(&certData, `select certificate from certificate_cache where id = ?`, identifier)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, model.ErrNotFound

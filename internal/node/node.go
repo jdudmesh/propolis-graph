@@ -415,196 +415,6 @@ func (n *node) handleLeave(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// func (n *node) handleCreateSubscription(w http.ResponseWriter, req *http.Request) {
-// 	params := model.SubscriptionRequest{}
-
-// 	body := req.Body
-// 	defer body.Close()
-
-// 	dec := json.NewDecoder(body)
-// 	err := dec.Decode(&params)
-// 	if err != nil {
-// 		w.WriteHeader(http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	n.logger.Debug("upsert sub for peer", "sub", params.Spec, "peer", req.RemoteAddr)
-// 	err = n.store.UpsertSubs(req.RemoteAddr, params.Spec)
-// 	if err != nil {
-// 		w.WriteHeader(http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	resp := &model.SubscriptionResponse{
-// 		Peers: make(map[string][]string),
-// 	}
-
-// 	for _, s := range params.Spec {
-// 		peers, err := n.store.FindPeersBySub(s)
-// 		if err != nil {
-// 			w.WriteHeader(http.StatusInternalServerError)
-// 			return
-// 		}
-// 		resp.Peers[s] = make([]string, len(peers))
-// 		for i, peer := range peers {
-// 			resp.Peers[s][i] = peer.RemoteAddr
-// 		}
-
-// 		// check if this is the only peer
-// 		if len(resp.Peers[s]) == 1 {
-// 			n.logger.Debug("adding pending peer", "remoteAddr", req.RemoteAddr, "sub", s)
-// 			n.store.AddPendingPeer(req.RemoteAddr, s)
-// 		} else {
-// 			n.notifyPendingPeers <- s
-// 		}
-// 	}
-
-// 	data, err := json.Marshal(resp)
-// 	if err != nil {
-// 		w.WriteHeader(http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	w.Header().Add(HeaderRemotAddress, req.RemoteAddr)
-// 	w.WriteHeader(http.StatusCreated)
-// 	w.Write(data)
-// }
-
-// func (n *node) doNotifyPendingPeers(sub string) error {
-// 	pendingPeers, err := n.store.GetPendingPeersForSub(sub)
-// 	if err != nil {
-// 		return fmt.Errorf("fetching pending peers: %w", err)
-// 	}
-
-// 	if len(pendingPeers) == 0 {
-// 		return nil
-// 	}
-// 	n.logger.Debug("notifying pending peers", "n", len(pendingPeers))
-
-// 	notification := &model.SubscriptionResponse{
-// 		Peers: make(map[string][]string),
-// 	}
-
-// 	peers, err := n.store.FindPeersBySub(sub)
-// 	if err != nil {
-// 		return fmt.Errorf("finding peers: %w", err)
-// 	}
-
-// 	notification.Peers[sub] = make([]string, len(peers))
-// 	for i, peer := range peers {
-// 		notification.Peers[sub][i] = peer.RemoteAddr
-// 	}
-
-// 	data, err := json.Marshal(notification)
-// 	if err != nil {
-// 		return fmt.Errorf("marshalling response: %w", err)
-// 	}
-
-// 	wg := sync.WaitGroup{}
-// 	for _, pp := range pendingPeers {
-// 		wg.Add(1)
-// 		go func() {
-// 			defer wg.Done()
-
-// 			n.logger.Info("notifying peer", "peer", pp.RemoteAddr, "sub", sub)
-
-// 			ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
-// 			defer cancelFn()
-
-// 			url := fmt.Sprintf("https://%s/subscription/peer", pp.RemoteAddr)
-// 			rdr := bytes.NewBuffer(data)
-// 			req, err := http.NewRequestWithContext(ctx, "POST", url, rdr)
-// 			if err != nil {
-// 				n.logger.Error("notifying peer (constructing request)", "error", err, "remote", pp.RemoteAddr, "sub", sub)
-// 				return
-// 			}
-// 			req.Header.Add(model.ContentTypeHeader, model.ContentTypeJSON)
-// 			resp, err := n.client.Do(req)
-// 			if err != nil {
-// 				n.logger.Error("notifying peer", "error", err, "remote", pp)
-// 				return
-// 			}
-
-// 			if resp.StatusCode != http.StatusOK {
-// 				n.logger.Error("bad notify response", "status", resp.StatusCode, "remote", pp.RemoteAddr)
-// 				return
-// 			}
-
-// 			err = n.store.RemovePendingPeer(pp.RemoteAddr, sub)
-// 			if err != nil {
-// 				n.logger.Error("cleanup", "error", err, "remote", pp, "sub", sub)
-// 				return
-// 			}
-
-// 			n.store.TouchPeer(pp.RemoteAddr)
-// 		}()
-// 	}
-// 	wg.Wait()
-
-// 	return nil
-// }
-
-// func (n *node) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
-// 	params := model.SubscriptionRequest{}
-
-// 	body := req.Body
-// 	defer body.Close()
-
-// 	dec := json.NewDecoder(body)
-// 	err := dec.Decode(&params)
-// 	if err != nil {
-// 		w.WriteHeader(http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	err = n.store.DeleteSubs(req.RemoteAddr, params.Spec)
-// 	if err != nil {
-// 		w.WriteHeader(http.StatusInternalServerError)
-// 		return
-// 	}
-
-// 	w.WriteHeader(http.StatusAccepted)
-// }
-
-// func (n *node) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Request) {
-// 	body := req.Body
-// 	defer body.Close()
-
-// 	respData := model.SubscriptionResponse{}
-// 	dec := json.NewDecoder(body)
-// 	err := dec.Decode(&respData)
-// 	if err != nil {
-// 		n.logger.Error("decoding ping response", "err", err)
-// 		w.WriteHeader(http.StatusBadRequest)
-// 		return
-// 	}
-
-// 	for sub, peerList := range respData.Peers {
-// 		// don't include ourselves in the list of peers
-// 		cleanedList := make([]string, 0, len(respData.Peers))
-// 		for _, peer := range peerList {
-// 			if peer == n.remoteAddr {
-// 				continue
-// 			}
-// 			cleanedList = append(cleanedList, peer)
-// 		}
-// 		if len(cleanedList) == 0 {
-// 			continue
-// 		}
-// 		n.logger.Info("peer update notification", "sub", sub, "remoteAddr", peerList)
-
-// 		n.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
-// 		err := n.store.UpsertPeersForSub(sub, cleanedList)
-// 		if err != nil {
-// 			n.logger.Error("upserting peers", "error", err)
-// 			w.WriteHeader(http.StatusInternalServerError)
-// 			return
-// 		}
-// 	}
-
-// 	w.WriteHeader(http.StatusOK)
-// }
-
 func (n *node) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 	n.logger.Info("action", "remote", req.RemoteAddr)
 
@@ -909,6 +719,12 @@ func (n *node) pingPeers() error {
 	if err != nil {
 		return fmt.Errorf("fetching peers: %w", err)
 	}
+
+	if len(peers) == 0 {
+		n.logger.Warn("no peers found")
+		return nil
+	}
+
 	for _, peer := range peers {
 		err := n.sendPing(peer.RemoteAddr)
 		if err != nil {
@@ -937,104 +753,6 @@ func (n *node) sendPing(remote string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("ping response code: %d", resp.StatusCode)
-	}
-
-	return nil
-}
-
-func (n *node) getInitialPeers() error {
-	seeds, err := n.store.GetSeeds()
-	if err != nil {
-		return fmt.Errorf("fetching peers: %w", err)
-	}
-
-	if len(seeds) == 0 {
-		return fmt.Errorf("geting peers: no seeds")
-	}
-
-	subs, err := n.store.GetSelfSubs()
-	if err != nil {
-		return fmt.Errorf("fetching peers: %w", err)
-	}
-	if len(subs) == 0 {
-		return nil
-	}
-
-	specs := make([]string, len(subs))
-	for i, s := range subs {
-		specs[i] = s.Spec
-	}
-
-	n.logger.Info("fetching peers", "seeds", len(seeds), "subs", len(subs))
-
-	for _, peer := range seeds {
-		err = n.sendSub(peer.RemoteAddr, specs)
-		if err != nil {
-			n.logger.Error("fetching peers", "error", err, "peer", peer, "subs", subs)
-			continue
-		}
-	}
-
-	return nil
-}
-
-func (n *node) refreshSubs() error {
-	n.logger.Debug("refreshing subs")
-	return nil
-}
-
-func (n *node) sendSub(peer string, subs []string) error {
-	n.logger.Debug("sending sub", "peer", peer, "subs", subs)
-
-	params := model.SubscriptionRequest{
-		Spec: subs,
-	}
-
-	data, err := json.Marshal(&params)
-	if err != nil {
-		return fmt.Errorf("marshalling subscription req: %w", err)
-	}
-
-	buf := bytes.NewBuffer(data)
-	resp, err := n.client.Post(fmt.Sprintf("https://%s/subscription", peer), model.ContentTypeJSON, buf)
-	if err != nil {
-		return fmt.Errorf("sending subscription req: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("create subscription resp code: %d", resp.StatusCode)
-	}
-
-	n.remoteAddr = resp.Header.Get(HeaderRemoteAddress)
-
-	respData := model.SubscriptionResponse{}
-	body := resp.Body
-	defer body.Close()
-
-	dec := json.NewDecoder(body)
-	err = dec.Decode(&respData)
-	if err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	for sub, peerList := range respData.Peers {
-		// don't include ourselves in the list of peers
-		cleanedList := make([]string, 0, len(respData.Peers))
-		for _, peer := range peerList {
-			if peer == n.remoteAddr {
-				continue
-			}
-			cleanedList = append(cleanedList, peer)
-		}
-		if len(cleanedList) == 0 {
-			continue
-		}
-
-		n.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
-		err := n.store.UpsertPeersForSub(sub, cleanedList)
-		if err != nil {
-			return fmt.Errorf("failed to decode response: %w", err)
-		}
 	}
 
 	return nil
@@ -1186,7 +904,7 @@ func (n *node) SendAction(id *identity.Identity, action string) error {
 }
 
 func (n *node) handleWhoIs(w http.ResponseWriter, req *http.Request) {
-	id := req.URL.Query().Get("id")
+	id := req.PathValue("id")
 	if id == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
