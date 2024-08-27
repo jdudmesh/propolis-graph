@@ -249,10 +249,13 @@ func (s *store) GetSeeds() ([]*model.PeerSpec, error) {
 	return peers, nil
 }
 
-func (s *store) GetPeers() ([]*model.PeerSpec, error) {
-	rows, err := s.db.Queryx(`select * from peers`)
+func (s *store) GetAllPeers() ([]*model.PeerSpec, error) {
+	rows, err := s.db.Queryx(`select *
+		from peers
+		order by coalesce(updated_at, created_at);`)
+
 	if err != nil {
-		return nil, fmt.Errorf("querying peers: %w", err)
+		return nil, fmt.Errorf("get all peers: %w", err)
 	}
 	defer rows.Close()
 
@@ -267,6 +270,91 @@ func (s *store) GetPeers() ([]*model.PeerSpec, error) {
 	}
 
 	return peers, nil
+}
+
+func (s *store) GetRandomPeers(excluding string) ([]*model.PeerSpec, error) {
+	rows, err := s.db.Queryx(`select *
+		from peers
+		where remote_addr != ?
+		order by coalesce(updated_at, created_at) limit 1000;`, excluding)
+
+	if err != nil {
+		return nil, fmt.Errorf("random peers: %w", err)
+	}
+	defer rows.Close()
+
+	peers := make([]*model.PeerSpec, 0)
+	for rows.Next() {
+		s := &model.PeerSpec{}
+		err = rows.StructScan(s)
+		if err != nil {
+			return nil, fmt.Errorf("scanning peer: %w", err)
+		}
+		peers = append(peers, s)
+	}
+
+	return peers, nil
+}
+
+func (s *store) DeletePeer(peer string) error {
+	_, err := s.db.Exec(`delete from peers where remote_addr = ?`, peer)
+	if err != nil {
+		return fmt.Errorf("delete peer: %w", err)
+	}
+	return nil
+}
+
+func (s *store) DeleteAgedPeers(before time.Time) error {
+	_, err := s.db.Exec(`delete from peers where coalesce(updated_at, created_at) < ?`, before)
+	if err != nil {
+		return fmt.Errorf("delete aged peers: %w", err)
+	}
+	return nil
+}
+
+func (s *store) UpsertPeer(peer string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`
+	insert into peers(remote_addr, created_at)
+	values(?, ?)
+	on conflict(remote_addr) do update set updated_at = ?`,
+		peer, now, now)
+
+	if err != nil {
+		return fmt.Errorf("upsert peer: %w", err)
+	}
+
+	return nil
+}
+
+func (s *store) UpsertPeers(peers []string) error {
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancelFn()
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("upsert peers (begin): %w", err)
+	}
+
+	now := time.Now().UTC()
+	for _, p := range peers {
+		_, err = tx.Exec(`
+			insert into peers(remote_addr, created_at)
+			values(?, ?)
+			on conflict(remote_addr) do update set updated_at = ?`,
+			p, now, now)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("upsert peers (insert peer): %w", err)
+		}
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("upsert peers (commit): %w", err)
+	}
+
+	return nil
 }
 
 func (s *store) UpsertPeersForSub(sub string, peers []string) error {
@@ -544,6 +632,15 @@ func (s *store) TouchPeer(remoteAddr string) error {
 	return nil
 }
 
+func (s *store) TouchSeed(remoteAddr string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`update seeds set updated_at = ? where remote_addr = ?`, now, remoteAddr)
+	if err != nil {
+		return fmt.Errorf("touch seed: %w", err)
+	}
+	return nil
+}
+
 func (s *store) CreateTx(ctx context.Context) (*sqlx.Tx, error) {
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -586,4 +683,13 @@ func (s *store) GetCachedCertificate(identifier string) (*x509.Certificate, erro
 	}
 
 	return cert, nil
+}
+
+func (s *store) CountOfPeers() (int, error) {
+	var count int
+	err := s.db.Get(&count, `select count(*) from peers`)
+	if err != nil {
+		return 0, fmt.Errorf("count of peers: %w", err)
+	}
+	return count, nil
 }

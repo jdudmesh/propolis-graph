@@ -31,3 +31,8 @@ type SubscriptionResponse struct {
 type Action struct {
 	Action string
 }
+
+type JoinResponse struct {
+	Seeds []string `json:"seeds"`
+	Peers []string `json:"peers"`
+}

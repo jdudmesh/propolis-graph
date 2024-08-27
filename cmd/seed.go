@@ -40,14 +40,24 @@ var seedCmd = &cobra.Command{
 			return fmt.Errorf("no port: %w", err)
 		}
 
-		nodeDatabaseURL, err := cmd.Flags().GetString("ndb")
+		isMemory, err := cmd.Flags().GetBool("mem")
 		if err != nil {
-			return fmt.Errorf("no db: %w", err)
+			return fmt.Errorf("no memory flag: %w", err)
 		}
 
-		graphDatabaseURL, err := cmd.Flags().GetString("gdb")
-		if err != nil {
-			return fmt.Errorf("no db: %w", err)
+		var nodeDatabaseURL, graphDatabaseURL string
+		if isMemory {
+			nodeDatabaseURL = fmt.Sprintf("file:node%d.db?mode=memory&_secure_delete=true", port)
+			graphDatabaseURL = fmt.Sprintf("file:graph%d.db?mode=memory&_secure_delete=true", port)
+		} else {
+			nodeDatabaseURL, err = cmd.Flags().GetString("ndb")
+			if err != nil {
+				return fmt.Errorf("no db: %w", err)
+			}
+			graphDatabaseURL, err = cmd.Flags().GetString("gdb")
+			if err != nil {
+				return fmt.Errorf("no db: %w", err)
+			}
 		}
 
 		seeds, err := cmd.Flags().GetStringArray("seed")

@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/model"
@@ -30,6 +32,8 @@ var httpClient *http.Client
 var nodeID string
 
 type Peer interface {
+	Run() error
+	CountOfPeers() (int, error)
 	SendIdentity(id *identity.Identity) error
 	SendAction(id *identity.Identity, action string) error
 }
@@ -85,15 +89,38 @@ func main() {
 		panic(err)
 	}
 
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		err = peer.Run()
+		if err != nil {
+			panic(err)
+		}
+	}()
+
+	for {
+		n, err := peer.CountOfPeers()
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("Number of peers: %d\n", n)
+		if n > 0 {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
 	err = peer.SendIdentity(id)
 	if err != nil {
 		panic(err)
 	}
 
-	err = sendFolders(id, db)
-	if err != nil {
-		slog.Error("folders", "error", err)
-	}
+	wg.Wait()
+	// err = sendFolders(id, db)
+	// if err != nil {
+	// 	slog.Error("folders", "error", err)
+	// }
 }
 
 func createPeer() (Peer, error) {
@@ -105,12 +132,18 @@ func createPeer() (Peer, error) {
 	config := model.NodeConfig{
 		Type:             model.NodeTypePeer,
 		Host:             "127.0.0.1",
-		Port:             9001,
+		Port:             9003,
 		Logger:           logger,
-		NodeDatabaseURL:  "file::node.db?mode=memory&cache=shared",
-		GraphDatabaseURL: "file::graph.db?mode=memory&cache=shared",
+		NodeDatabaseURL:  "file::node9003.db?mode=memory&cache=shared",
+		GraphDatabaseURL: "file::graph9003.db?mode=memory&cache=shared",
 	}
-	return node.New(config)
+	peer, err := node.New(config)
+	if err != nil {
+		return nil, err
+	}
+
+	peer.SetInitialSeeds([]string{"127.0.0.1:9000"})
+	return peer, nil
 }
 
 func sendIdentity(peer Peer, id *identity.Identity) error {
@@ -132,7 +165,7 @@ func sendIdentity(peer Peer, id *identity.Identity) error {
 	sb.WriteString(strings.Join(props, ", "))
 	sb.WriteString("})")
 
-	err = postAction(id, sb.String())
+	err = peer.SendAction(id, sb.String())
 	if err != nil {
 		return err
 	}

@@ -56,6 +56,7 @@ func init() {
 	baseCmd.PersistentFlags().String("ndb", "file:./data/node.db?mode=rwc&_secure_delete=true", "Node DB connection string")
 	baseCmd.PersistentFlags().String("gdb", "file:./data/graph.db?mode=rwc&_secure_delete=true", "Graph DB connection string")
 	baseCmd.PersistentFlags().StringArray("seed", []string{}, "host:port spec for seed")
+	baseCmd.PersistentFlags().Bool("mem", false, "Use in memory databases")
 
 	viper.BindPFlag("host", baseCmd.Flags().Lookup("host"))
 	viper.BindPFlag("port", baseCmd.Flags().Lookup("port"))
