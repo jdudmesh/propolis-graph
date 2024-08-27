@@ -80,7 +80,7 @@ func createSchema(db *sqlx.DB) error {
 	}
 
 	err = m.Up()
-	if !errors.Is(err, migrate.ErrNoChange) {
+	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return err
 	}
 

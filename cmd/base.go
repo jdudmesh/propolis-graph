@@ -53,14 +53,13 @@ func init() {
 	baseCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./propolis.yaml)")
 	baseCmd.PersistentFlags().String("host", "0.0.0.0", "Peer listen address")
 	baseCmd.PersistentFlags().Int("port", 9090, "Peer listen port")
-	baseCmd.PersistentFlags().String("db", "file:./data/propolis.db?mode=rwc&_secure_delete=true", "DB connection string")
-	baseCmd.PersistentFlags().String("migrations", "./migrations", "DB migrations dir")
+	baseCmd.PersistentFlags().String("ndb", "file:./data/node.db?mode=rwc&_secure_delete=true", "Node DB connection string")
+	baseCmd.PersistentFlags().String("gdb", "file:./data/graph.db?mode=rwc&_secure_delete=true", "Graph DB connection string")
 	baseCmd.PersistentFlags().StringArray("seed", []string{}, "host:port spec for seed")
 
 	viper.BindPFlag("host", baseCmd.Flags().Lookup("host"))
 	viper.BindPFlag("port", baseCmd.Flags().Lookup("port"))
 	viper.BindPFlag("db", baseCmd.Flags().Lookup("db"))
-	viper.BindPFlag("migrations", baseCmd.Flags().Lookup("migrations"))
 	viper.BindPFlag("seed", baseCmd.Flags().Lookup("seed"))
 
 	cobra.OnInitialize(initConfig)

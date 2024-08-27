@@ -15,8 +15,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jdudmesh/propolis/internal/datastore"
 	"github.com/jdudmesh/propolis/internal/identity"
+	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jdudmesh/propolis/internal/node"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
@@ -56,7 +56,15 @@ func main() {
 	}
 
 	cwd := os.Getenv("WORKSPACE_DIR")
+	if cwd == "" {
+		cwd, err = os.Getwd()
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	databaseUrl := fmt.Sprintf("file:%s/data/identity.db?mode=rwc&_secure_delete=true", cwd)
+	fmt.Println(databaseUrl)
 	store, err := identity.NewStore(databaseUrl)
 	if err != nil {
 		panic(err)
@@ -94,15 +102,15 @@ func createPeer() (Peer, error) {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 
-	dbConn := "file::memory:?cache=shared"
-	migrationsDir := "./migrations"
-	stateStore, err := datastore.NewInternalState(dbConn, migrationsDir, []string{"127.0.0.1:9000"}, []string{})
-	if err != nil {
-		slog.Error("store init", "error", err)
-		panic("unable to init state store")
+	config := model.NodeConfig{
+		Type:             model.NodeTypePeer,
+		Host:             "127.0.0.1",
+		Port:             9001,
+		Logger:           logger,
+		NodeDatabaseURL:  "file::node.db?mode=memory&cache=shared",
+		GraphDatabaseURL: "file::graph.db?mode=memory&cache=shared",
 	}
-
-	return node.NewPeer("127.0.0.1", 9001, stateStore, logger)
+	return node.New(config)
 }
 
 func sendIdentity(peer Peer, id *identity.Identity) error {

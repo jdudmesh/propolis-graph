@@ -41,7 +41,7 @@ import (
 	"time"
 
 	"github.com/jdudmesh/propolis/internal/ast"
-	"github.com/jdudmesh/propolis/internal/executor"
+	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/model"
 	gonanoid "github.com/matoous/go-nanoid/v2"
@@ -62,14 +62,6 @@ const (
 	SelfRemoteAddress = "0.0.0.0"
 )
 
-type NodeType int
-
-const (
-	NodeTypeSeed NodeType = iota
-	NodeTypePeer
-	NodeTypeCache
-)
-
 type Executor interface {
 	Execute(stmt any) (any, error)
 }
@@ -84,7 +76,7 @@ type Action struct {
 	Certificate x509.Certificate
 }
 
-type peer struct {
+type node struct {
 	nodeID             string
 	host               string
 	port               int
@@ -97,29 +89,17 @@ type peer struct {
 	actionQueue        chan Action
 	quit               chan struct{}
 	remoteAddr         string
-	nodeType           NodeType
+	nodeType           model.NodeType
 	executor           Executor
 }
 
-func NewSeed(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger) (*peer, error) {
-	return new(host, port, databaseURL, migrationsDir, logger, NodeTypeSeed)
-}
-
-func NewPeer(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger) (*peer, error) {
-	return new(host, port, databaseURL, migrationsDir, logger, NodeTypePeer)
-}
-
-func NewCache(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger) (*peer, error) {
-	return new(host, port, databaseURL, migrationsDir, logger, NodeTypeCache)
-}
-
-func new(host string, port int, databaseURL, migrationsDir string, logger *slog.Logger, nodeType NodeType) (*peer, error) {
-	store, err := newStore(databaseURL, migrationsDir)
+func New(config model.NodeConfig) (*node, error) {
+	store, err := newStore(config.NodeDatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
 
-	executor, err := executor.New(databaseURL, logger)
+	executor, err := graph.New(config)
 	if err != nil {
 		return nil, fmt.Errorf("creating executor: %w", err)
 	}
@@ -129,61 +109,61 @@ func new(host string, port int, databaseURL, migrationsDir string, logger *slog.
 		return nil, fmt.Errorf("generating node id: %w", err)
 	}
 
-	p := &peer{
+	n := &node{
 		nodeID:             nodeID,
-		host:               host,
-		port:               port,
+		host:               config.Host,
+		port:               config.Port,
 		store:              store,
-		logger:             logger,
-		nodeType:           nodeType,
+		logger:             config.Logger,
+		nodeType:           config.Type,
 		executor:           executor,
 		notifyPendingPeers: make(chan string),
 		actionQueue:        make(chan Action),
 		quit:               make(chan struct{}),
 	}
 
-	p.server = &http3.Server{
-		Handler: p.newServeMux(),
+	n.server = &http3.Server{
+		Handler: n.newServeMux(),
 	}
 
-	return p, nil
+	return n, nil
 }
 
-func (p *peer) SetInitialSeeds(seeds []string) error {
-	return p.store.UpsertSeeds(seeds)
+func (n *node) SetInitialSeeds(seeds []string) error {
+	return n.store.UpsertSeeds(seeds)
 }
 
-func (p *peer) SetInitialSubscriptions(subs []string) error {
-	return p.store.InitSubs(subs)
+func (n *node) SetInitialSubscriptions(subs []string) error {
+	return n.store.InitSubs(subs)
 }
 
-func (p *peer) newServeMux() *http.ServeMux {
+func (n *node) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	switch p.nodeType {
-	case NodeTypeSeed:
+	switch n.nodeType {
+	case model.NodeTypeSeed:
 		fallthrough
-	case NodeTypePeer:
-		mux.HandleFunc("POST /subscription", p.handleCreateSubscription)
-		mux.HandleFunc("DELETE /subscription", p.handleDeleteSubscription)
-		mux.HandleFunc("POST /subscription/peer", p.handleSubscriptionPeerUpdate)
-		mux.HandleFunc("POST /ping", p.handlePing)
-		mux.HandleFunc("POST /pong", p.handlePong)
-		mux.HandleFunc("GER /certificate/{id}", p.handleGetCertificate)
-	case NodeTypeCache:
-		mux.HandleFunc("POST /action", p.handleCreateAction)
+	case model.NodeTypePeer:
+		mux.HandleFunc("POST /subscription", n.handleCreateSubscription)
+		mux.HandleFunc("DELETE /subscription", n.handleDeleteSubscription)
+		mux.HandleFunc("POST /subscription/peer", n.handleSubscriptionPeerUpdate)
+		mux.HandleFunc("POST /ping", n.handlePing)
+		mux.HandleFunc("POST /pong", n.handlePong)
+		mux.HandleFunc("GER /certificate/{id}", n.handleGetCertificate)
+	case model.NodeTypeCache:
+		mux.HandleFunc("POST /action", n.handleCreateAction)
 	}
 	return mux
 }
 
-func (p *peer) Run() error {
-	defer p.server.CloseGracefully(10 * time.Second)
+func (n *node) Run() error {
+	defer n.server.CloseGracefully(10 * time.Second)
 
-	addr := &net.UDPAddr{IP: net.ParseIP(p.host), Port: p.port}
-	switch p.nodeType {
-	case NodeTypePeer:
-		p.logger.Info("starting peer", "addr", addr)
-	case NodeTypeSeed:
-		p.logger.Info("starting seed", "addr", addr)
+	addr := &net.UDPAddr{IP: net.ParseIP(n.host), Port: n.port}
+	switch n.nodeType {
+	case model.NodeTypePeer:
+		n.logger.Info("starting peer", "addr", addr)
+	case model.NodeTypeSeed:
+		n.logger.Info("starting seed", "addr", addr)
 	}
 
 	udpConn, err := net.ListenUDP("udp", addr)
@@ -196,14 +176,14 @@ func (p *peer) Run() error {
 	}
 	defer tr.Close()
 
-	p.roundTripper = &http3.RoundTripper{
+	n.roundTripper = &http3.RoundTripper{
 		TLSClientConfig: &tls.Config{
 			NextProtos:         []string{"h3", "propolis"},
 			InsecureSkipVerify: true,
 		},
 		QUICConfig: &quic.Config{}, // QUIC connection options
 		Dial: func(ctx context.Context, addr string, tlsConf *tls.Config, quicConf *quic.Config) (quic.EarlyConnection, error) {
-			p.logger.Debug("dialing", "addr", addr)
+			n.logger.Debug("dialing", "addr", addr)
 			a, err := net.ResolveUDPAddr("udp", addr)
 			if err != nil {
 				return nil, err
@@ -211,43 +191,43 @@ func (p *peer) Run() error {
 			return tr.DialEarly(ctx, a, tlsConf, quicConf)
 		},
 	}
-	defer p.roundTripper.Close()
+	defer n.roundTripper.Close()
 
-	p.client = &http.Client{
-		Transport: p.roundTripper,
+	n.client = &http.Client{
+		Transport: n.roundTripper,
 	}
 
-	listener, err := tr.ListenEarly(p.generateTLSConfig(), nil)
+	listener, err := tr.ListenEarly(n.generateTLSConfig(), nil)
 	if err != nil {
 		return fmt.Errorf("setting up listener sock: %w", err)
 	}
 
 	go func() {
-		err := p.server.ServeListener(listener)
+		err := n.server.ServeListener(listener)
 		if err != nil {
-			p.logger.Error("closing peer server", "error", err)
+			n.logger.Error("closing peer server", "error", err)
 		}
 	}()
 
-	err = p.pingSeeds()
+	err = n.pingSeeds()
 	if err != nil {
 		return fmt.Errorf("refreshing seeds: %w", err)
 	}
 
-	switch p.nodeType {
-	case NodeTypePeer:
-		return p.runLoopPeer()
-	case NodeTypeSeed:
-		return p.runLoopSeed()
-	case NodeTypeCache:
-		return p.runLoopCache()
+	switch n.nodeType {
+	case model.NodeTypePeer:
+		return n.runLoopPeer()
+	case model.NodeTypeSeed:
+		return n.runLoopSeed()
+	case model.NodeTypeCache:
+		return n.runLoopCache()
 	}
 
 	return nil
 }
 
-func (p *peer) runLoopPeer() error {
-	err := p.getInitialPeers()
+func (n *node) runLoopPeer() error {
+	err := n.getInitialPeers()
 	if err != nil {
 		return fmt.Errorf("obtaining peers: %w", err)
 	}
@@ -260,23 +240,23 @@ func (p *peer) runLoopPeer() error {
 	for {
 		select {
 		case <-t1.C:
-			err := p.refreshSubs()
+			err := n.refreshSubs()
 			if err != nil {
-				p.logger.Error("refreshing subscriptions", "error", err)
+				n.logger.Error("refreshing subscriptions", "error", err)
 			}
-			p.roundTripper.CloseIdleConnections()
+			n.roundTripper.CloseIdleConnections()
 		case <-t2.C:
-			err := p.pingSeeds()
+			err := n.pingSeeds()
 			if err != nil {
-				p.logger.Error("refreshing seeds", "error", err)
+				n.logger.Error("refreshing seeds", "error", err)
 			}
-		case <-p.quit:
+		case <-n.quit:
 			return nil
 		}
 	}
 }
 
-func (p *peer) runLoopSeed() error {
+func (n *node) runLoopSeed() error {
 	t1 := time.NewTicker(5 * time.Second)
 	defer t1.Stop()
 	t2 := time.NewTicker(60 * time.Minute)
@@ -284,25 +264,25 @@ func (p *peer) runLoopSeed() error {
 
 	for {
 		select {
-		case sub := <-p.notifyPendingPeers:
-			err := p.doNotifyPendingPeers(sub)
+		case sub := <-n.notifyPendingPeers:
+			err := n.doNotifyPendingPeers(sub)
 			if err != nil {
-				p.logger.Error("notifying peers", "error", err)
+				n.logger.Error("notifying peers", "error", err)
 			}
 		case <-t1.C:
-			p.roundTripper.CloseIdleConnections()
+			n.roundTripper.CloseIdleConnections()
 		case <-t2.C:
-			err := p.pingSeeds()
+			err := n.pingSeeds()
 			if err != nil {
-				p.logger.Error("refreshing seeds", "error", err)
+				n.logger.Error("refreshing seeds", "error", err)
 			}
-		case <-p.quit:
+		case <-n.quit:
 			return nil
 		}
 	}
 }
 
-func (p *peer) runLoopCache() error {
+func (n *node) runLoopCache() error {
 	dispatchQueue := make(chan any)
 	defer close(dispatchQueue)
 
@@ -318,15 +298,15 @@ func (p *peer) runLoopCache() error {
 outer:
 	for {
 		select {
-		case action := <-p.actionQueue:
+		case action := <-n.actionQueue:
 
-			res, err := p.executor.Execute(action.Command)
+			res, err := n.executor.Execute(action.Command)
 			if err != nil {
-				p.logger.Error("executing action", "error", err)
+				n.logger.Error("executing action", "error", err)
 				continue
 			}
 			dispatchQueue <- res
-		case <-p.quit:
+		case <-n.quit:
 			break outer
 		}
 	}
@@ -337,12 +317,12 @@ outer:
 	return nil
 }
 
-func (p *peer) Close() error {
-	close(p.quit)
+func (n *node) Close() error {
+	close(n.quit)
 	return nil
 }
 
-func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request) {
+func (n *node) handleCreateSubscription(w http.ResponseWriter, req *http.Request) {
 	params := model.SubscriptionRequest{}
 
 	body := req.Body
@@ -355,8 +335,8 @@ func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	p.logger.Debug("upsert sub for peer", "sub", params.Spec, "peer", req.RemoteAddr)
-	err = p.store.UpsertSubs(req.RemoteAddr, params.Spec)
+	n.logger.Debug("upsert sub for peer", "sub", params.Spec, "peer", req.RemoteAddr)
+	err = n.store.UpsertSubs(req.RemoteAddr, params.Spec)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -367,7 +347,7 @@ func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request
 	}
 
 	for _, s := range params.Spec {
-		peers, err := p.store.FindPeersBySub(s)
+		peers, err := n.store.FindPeersBySub(s)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -379,10 +359,10 @@ func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request
 
 		// check if this is the only peer
 		if len(resp.Peers[s]) == 1 {
-			p.logger.Debug("adding pending peer", "remoteAddr", req.RemoteAddr, "sub", s)
-			p.store.AddPendingPeer(req.RemoteAddr, s)
+			n.logger.Debug("adding pending peer", "remoteAddr", req.RemoteAddr, "sub", s)
+			n.store.AddPendingPeer(req.RemoteAddr, s)
 		} else {
-			p.notifyPendingPeers <- s
+			n.notifyPendingPeers <- s
 		}
 	}
 
@@ -397,8 +377,8 @@ func (p *peer) handleCreateSubscription(w http.ResponseWriter, req *http.Request
 	w.Write(data)
 }
 
-func (p *peer) doNotifyPendingPeers(sub string) error {
-	pendingPeers, err := p.store.GetPendingPeersForSub(sub)
+func (n *node) doNotifyPendingPeers(sub string) error {
+	pendingPeers, err := n.store.GetPendingPeersForSub(sub)
 	if err != nil {
 		return fmt.Errorf("fetching pending peers: %w", err)
 	}
@@ -406,13 +386,13 @@ func (p *peer) doNotifyPendingPeers(sub string) error {
 	if len(pendingPeers) == 0 {
 		return nil
 	}
-	p.logger.Debug("notifying pending peers", "n", len(pendingPeers))
+	n.logger.Debug("notifying pending peers", "n", len(pendingPeers))
 
 	notification := &model.SubscriptionResponse{
 		Peers: make(map[string][]string),
 	}
 
-	peers, err := p.store.FindPeersBySub(sub)
+	peers, err := n.store.FindPeersBySub(sub)
 	if err != nil {
 		return fmt.Errorf("finding peers: %w", err)
 	}
@@ -433,7 +413,7 @@ func (p *peer) doNotifyPendingPeers(sub string) error {
 		go func() {
 			defer wg.Done()
 
-			p.logger.Info("notifying peer", "peer", pp.RemoteAddr, "sub", sub)
+			n.logger.Info("notifying peer", "peer", pp.RemoteAddr, "sub", sub)
 
 			ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancelFn()
@@ -442,28 +422,28 @@ func (p *peer) doNotifyPendingPeers(sub string) error {
 			rdr := bytes.NewBuffer(data)
 			req, err := http.NewRequestWithContext(ctx, "POST", url, rdr)
 			if err != nil {
-				p.logger.Error("notifying peer (constructing request)", "error", err, "remote", pp.RemoteAddr, "sub", sub)
+				n.logger.Error("notifying peer (constructing request)", "error", err, "remote", pp.RemoteAddr, "sub", sub)
 				return
 			}
 			req.Header.Add(model.ContentTypeHeader, model.ContentTypeJSON)
-			resp, err := p.client.Do(req)
+			resp, err := n.client.Do(req)
 			if err != nil {
-				p.logger.Error("notifying peer", "error", err, "remote", pp)
+				n.logger.Error("notifying peer", "error", err, "remote", pp)
 				return
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				p.logger.Error("bad notify response", "status", resp.StatusCode, "remote", pp.RemoteAddr)
+				n.logger.Error("bad notify response", "status", resp.StatusCode, "remote", pp.RemoteAddr)
 				return
 			}
 
-			err = p.store.RemovePendingPeer(pp.RemoteAddr, sub)
+			err = n.store.RemovePendingPeer(pp.RemoteAddr, sub)
 			if err != nil {
-				p.logger.Error("cleanup", "error", err, "remote", pp, "sub", sub)
+				n.logger.Error("cleanup", "error", err, "remote", pp, "sub", sub)
 				return
 			}
 
-			p.store.TouchPeer(pp.RemoteAddr)
+			n.store.TouchPeer(pp.RemoteAddr)
 		}()
 	}
 	wg.Wait()
@@ -471,7 +451,7 @@ func (p *peer) doNotifyPendingPeers(sub string) error {
 	return nil
 }
 
-func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
+func (n *node) handleDeleteSubscription(w http.ResponseWriter, req *http.Request) {
 	params := model.SubscriptionRequest{}
 
 	body := req.Body
@@ -484,7 +464,7 @@ func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	err = p.store.DeleteSubs(req.RemoteAddr, params.Spec)
+	err = n.store.DeleteSubs(req.RemoteAddr, params.Spec)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -493,7 +473,7 @@ func (p *peer) handleDeleteSubscription(w http.ResponseWriter, req *http.Request
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (p *peer) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Request) {
+func (n *node) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Request) {
 	body := req.Body
 	defer body.Close()
 
@@ -501,7 +481,7 @@ func (p *peer) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Req
 	dec := json.NewDecoder(body)
 	err := dec.Decode(&respData)
 	if err != nil {
-		p.logger.Error("decoding ping response", "err", err)
+		n.logger.Error("decoding ping response", "err", err)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -510,7 +490,7 @@ func (p *peer) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Req
 		// don't include ourselves in the list of peers
 		cleanedList := make([]string, 0, len(respData.Peers))
 		for _, peer := range peerList {
-			if peer == p.remoteAddr {
+			if peer == n.remoteAddr {
 				continue
 			}
 			cleanedList = append(cleanedList, peer)
@@ -518,12 +498,12 @@ func (p *peer) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Req
 		if len(cleanedList) == 0 {
 			continue
 		}
-		p.logger.Info("peer update notification", "sub", sub, "remoteAddr", peerList)
+		n.logger.Info("peer update notification", "sub", sub, "remoteAddr", peerList)
 
-		p.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
-		err := p.store.UpsertPeersForSub(sub, cleanedList)
+		n.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
+		err := n.store.UpsertPeersForSub(sub, cleanedList)
 		if err != nil {
-			p.logger.Error("upserting peers", "error", err)
+			n.logger.Error("upserting peers", "error", err)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -532,8 +512,8 @@ func (p *peer) handleSubscriptionPeerUpdate(w http.ResponseWriter, req *http.Req
 	w.WriteHeader(http.StatusOK)
 }
 
-func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
-	p.logger.Info("action", "remote", req.RemoteAddr)
+func (n *node) handleCreateAction(w http.ResponseWriter, req *http.Request) {
+	n.logger.Info("action", "remote", req.RemoteAddr)
 
 	body := req.Body
 	defer body.Close()
@@ -541,7 +521,7 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 	rdr := io.LimitReader(body, MaxBodySize)
 	buf, err := io.ReadAll(rdr)
 	if err != nil {
-		p.logger.Error("reading body", "error", err)
+		n.logger.Error("reading body", "error", err)
 	}
 
 	identity := req.Header.Get(HeaderIdentifier)
@@ -556,16 +536,16 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// TODO: if certificate is not found, fetch it from the sender
-	cert, err := p.store.GetCachedCertificate(identity)
+	cert, err := n.store.GetCachedCertificate(identity)
 	if err != nil {
 		if !errors.Is(err, model.ErrNotFound) {
-			p.logger.Error("getting certificate", "error", err, "id", identity)
+			n.logger.Error("getting certificate", "error", err, "id", identity)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		cert, err = p.requestCertificate(identity, req.RemoteAddr)
+		cert, err = n.requestCertificate(identity, req.RemoteAddr)
 		if err != nil {
-			p.logger.Error("fetching certificate", "error", err, "id", identity)
+			n.logger.Error("fetching certificate", "error", err, "id", identity)
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -582,18 +562,18 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	} else {
-		p.logger.Error("unsupported public key type")
+		n.logger.Error("unsupported public key type")
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	err = p.store.AddAction(actionID, action, req.RemoteAddr)
+	err = n.store.AddAction(actionID, action, req.RemoteAddr)
 	if err != nil {
 		if errors.Is(err, model.ErrAlreadyExists) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
-		p.logger.Error("storing action", "error", err, "identifier", cert.Issuer.CommonName, "id", actionID, "action", action)
+		n.logger.Error("storing action", "error", err, "identifier", cert.Issuer.CommonName, "id", actionID, "action", action)
 	}
 
 	parser, err := ast.Parse(action)
@@ -601,30 +581,30 @@ func (p *peer) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, err := w.Write([]byte("syntax error: " + err.Error()))
 		if err != nil {
-			p.logger.Error("sending response", "error", err)
+			n.logger.Error("sending response", "error", err)
 		}
 		return
 	}
 
-	p.actionQueue <- Action{
+	n.actionQueue <- Action{
 		ID:          actionID,
 		Timestamp:   time.Now().UTC(),
 		NodeID:      nodeID,
-		RemoteAddr:  p.remoteAddr,
+		RemoteAddr:  n.remoteAddr,
 		Certificate: *cert,
 		Action:      action,
 		Command:     parser.Command(),
 	}
 
-	p.logger.Info("action", "id", actionID, "action", action)
+	n.logger.Info("action", "id", actionID, "action", action)
 
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (p *peer) handlePing(w http.ResponseWriter, req *http.Request) {
-	p.logger.Info("ping", "remote", req.RemoteAddr)
+func (n *node) handlePing(w http.ResponseWriter, req *http.Request) {
+	n.logger.Info("ping", "remote", req.RemoteAddr)
 
-	seeds, err := p.store.GetSeeds()
+	seeds, err := n.store.GetSeeds()
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -651,24 +631,24 @@ func (p *peer) handlePing(w http.ResponseWriter, req *http.Request) {
 	w.Write(data)
 }
 
-func (p *peer) sendPong(addr string) {
-	resp, err := p.client.Post(fmt.Sprintf("https://%s/pong", addr), model.ContentTypeJSON, nil)
+func (n *node) sendPong(addr string) {
+	resp, err := n.client.Post(fmt.Sprintf("https://%s/pong", addr), model.ContentTypeJSON, nil)
 	if err != nil {
-		p.logger.Error("sending pong", "error", err, "remote", addr)
+		n.logger.Error("sending pong", "error", err, "remote", addr)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		p.logger.Error("bad pong response", "remote", addr)
+		n.logger.Error("bad pong response", "remote", addr)
 	}
 }
 
-func (p *peer) handlePong(w http.ResponseWriter, req *http.Request) {
-	p.logger.Info("pong", "remote", req.RemoteAddr)
+func (n *node) handlePong(w http.ResponseWriter, req *http.Request) {
+	n.logger.Info("pong", "remote", req.RemoteAddr)
 	w.WriteHeader(http.StatusOK)
 }
 
-func (p *peer) pingSeeds() error {
-	seeds, err := p.store.GetSeeds()
+func (n *node) pingSeeds() error {
+	seeds, err := n.store.GetSeeds()
 	if err != nil {
 		return fmt.Errorf("fetching seeds: %w", err)
 	}
@@ -688,7 +668,7 @@ func (p *peer) pingSeeds() error {
 		go func() {
 			defer wg.Done()
 
-			p.logger.Debug("pinging seed", "seed", seed.RemoteAddr)
+			n.logger.Debug("pinging seed", "seed", seed.RemoteAddr)
 
 			ctxInner, cancelFnInner := context.WithTimeout(ctx, 5*time.Second)
 			defer cancelFnInner()
@@ -696,18 +676,18 @@ func (p *peer) pingSeeds() error {
 			url := fmt.Sprintf("https://%s/ping", seed.RemoteAddr)
 			req, err := http.NewRequestWithContext(ctxInner, "POST", url, nil)
 			if err != nil {
-				p.logger.Error("sending ping (constructing request)", "error", err, "remote", seed)
+				n.logger.Error("sending ping (constructing request)", "error", err, "remote", seed)
 				return
 			}
 			req.Header.Add(model.ContentTypeHeader, model.ContentTypeJSON)
-			resp, err := p.client.Do(req)
+			resp, err := n.client.Do(req)
 			if err != nil {
-				p.logger.Error("sending ping", "error", err, "remote", seed)
+				n.logger.Error("sending ping", "error", err, "remote", seed)
 				return
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				p.logger.Error("bad ping response", "remote", seed)
+				n.logger.Error("bad ping response", "remote", seed)
 				return
 			}
 
@@ -718,7 +698,7 @@ func (p *peer) pingSeeds() error {
 			dec := json.NewDecoder(body)
 			err = dec.Decode(&respData)
 			if err != nil {
-				p.logger.Error("decoding ping response", "err", err)
+				n.logger.Error("decoding ping response", "err", err)
 				return
 			}
 			ch <- respData
@@ -740,20 +720,20 @@ func (p *peer) pingSeeds() error {
 	for k := range seedMap {
 		seedList = append(seedList, k)
 	}
-	err = p.store.UpsertSeeds(seedList)
+	err = n.store.UpsertSeeds(seedList)
 	if err != nil {
 		return fmt.Errorf("updating seeds: %w", err)
 	}
 
 	if len(seedList) == 0 {
-		p.logger.Warn("no seeds found")
+		n.logger.Warn("no seeds found")
 	}
 
 	return nil
 }
 
-func (p *peer) getInitialPeers() error {
-	seeds, err := p.store.GetSeeds()
+func (n *node) getInitialPeers() error {
+	seeds, err := n.store.GetSeeds()
 	if err != nil {
 		return fmt.Errorf("fetching peers: %w", err)
 	}
@@ -762,7 +742,7 @@ func (p *peer) getInitialPeers() error {
 		return fmt.Errorf("geting peers: no seeds")
 	}
 
-	subs, err := p.store.GetSelfSubs()
+	subs, err := n.store.GetSelfSubs()
 	if err != nil {
 		return fmt.Errorf("fetching peers: %w", err)
 	}
@@ -775,12 +755,12 @@ func (p *peer) getInitialPeers() error {
 		specs[i] = s.Spec
 	}
 
-	p.logger.Info("fetching peers", "seeds", len(seeds), "subs", len(subs))
+	n.logger.Info("fetching peers", "seeds", len(seeds), "subs", len(subs))
 
 	for _, peer := range seeds {
-		err = p.sendSub(peer.RemoteAddr, specs)
+		err = n.sendSub(peer.RemoteAddr, specs)
 		if err != nil {
-			p.logger.Error("fetching peers", "error", err, "peer", peer, "subs", subs)
+			n.logger.Error("fetching peers", "error", err, "peer", peer, "subs", subs)
 			continue
 		}
 	}
@@ -788,13 +768,13 @@ func (p *peer) getInitialPeers() error {
 	return nil
 }
 
-func (p *peer) refreshSubs() error {
-	p.logger.Debug("refreshing subs")
+func (n *node) refreshSubs() error {
+	n.logger.Debug("refreshing subs")
 	return nil
 }
 
-func (p *peer) sendSub(peer string, subs []string) error {
-	p.logger.Debug("sending sub", "peer", peer, "subs", subs)
+func (n *node) sendSub(peer string, subs []string) error {
+	n.logger.Debug("sending sub", "peer", peer, "subs", subs)
 
 	params := model.SubscriptionRequest{
 		Spec: subs,
@@ -806,7 +786,7 @@ func (p *peer) sendSub(peer string, subs []string) error {
 	}
 
 	buf := bytes.NewBuffer(data)
-	resp, err := p.client.Post(fmt.Sprintf("https://%s/subscription", peer), model.ContentTypeJSON, buf)
+	resp, err := n.client.Post(fmt.Sprintf("https://%s/subscription", peer), model.ContentTypeJSON, buf)
 	if err != nil {
 		return fmt.Errorf("sending subscription req: %w", err)
 	}
@@ -815,7 +795,7 @@ func (p *peer) sendSub(peer string, subs []string) error {
 		return fmt.Errorf("create subscription resp code: %d", resp.StatusCode)
 	}
 
-	p.remoteAddr = resp.Header.Get(HeaderRemotAddress)
+	n.remoteAddr = resp.Header.Get(HeaderRemotAddress)
 
 	respData := model.SubscriptionResponse{}
 	body := resp.Body
@@ -831,7 +811,7 @@ func (p *peer) sendSub(peer string, subs []string) error {
 		// don't include ourselves in the list of peers
 		cleanedList := make([]string, 0, len(respData.Peers))
 		for _, peer := range peerList {
-			if peer == p.remoteAddr {
+			if peer == n.remoteAddr {
 				continue
 			}
 			cleanedList = append(cleanedList, peer)
@@ -840,8 +820,8 @@ func (p *peer) sendSub(peer string, subs []string) error {
 			continue
 		}
 
-		p.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
-		err := p.store.UpsertPeersForSub(sub, cleanedList)
+		n.logger.Debug("upsert peers for sub", "sub", sub, "peers", cleanedList)
+		err := n.store.UpsertPeersForSub(sub, cleanedList)
 		if err != nil {
 			return fmt.Errorf("failed to decode response: %w", err)
 		}
@@ -850,14 +830,14 @@ func (p *peer) sendSub(peer string, subs []string) error {
 	return nil
 }
 
-func (p *peer) generateTLSConfig() *tls.Config {
+func (n *node) generateTLSConfig() *tls.Config {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
 	}
 	template := x509.Certificate{
 		Subject: pkix.Name{
-			CommonName: p.nodeID,
+			CommonName: n.nodeID,
 		},
 		SerialNumber: big.NewInt(1),
 	}
@@ -879,7 +859,7 @@ func (p *peer) generateTLSConfig() *tls.Config {
 	}
 }
 
-func (p *peer) SendIdentity(id *identity.Identity) error {
+func (n *node) SendIdentity(id *identity.Identity) error {
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.CertificateData}))
 	certPEMEncoded, err := json.Marshal(certPEM)
 	if err != nil {
@@ -897,7 +877,7 @@ func (p *peer) SendIdentity(id *identity.Identity) error {
 	sb.WriteString(strings.Join(props, ", "))
 	sb.WriteString("})")
 
-	err = p.SendAction(id, sb.String())
+	err = n.SendAction(id, sb.String())
 	if err != nil {
 		return err
 	}
@@ -905,7 +885,7 @@ func (p *peer) SendIdentity(id *identity.Identity) error {
 	return nil
 }
 
-func (p *peer) SendAction(id *identity.Identity, action string) error {
+func (n *node) SendAction(id *identity.Identity, action string) error {
 	var privateKey ed25519.PrivateKey
 	for _, key := range id.Keys {
 		if key.Type == identity.KeyTypeED25519PrivateKey {
@@ -921,7 +901,7 @@ func (p *peer) SendAction(id *identity.Identity, action string) error {
 	if err != nil {
 		return fmt.Errorf("parsing certificate: %w", err)
 	}
-	p.store.PutCachedCertificate(cert)
+	n.store.PutCachedCertificate(cert)
 
 	actionID := gonanoid.Must()
 
@@ -937,7 +917,7 @@ func (p *peer) SendAction(id *identity.Identity, action string) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelFn()
 
-	peers, err := p.store.GetPeers()
+	peers, err := n.store.GetPeers()
 	if err != nil {
 		return fmt.Errorf("getting peers: %w", err)
 	}
@@ -946,14 +926,14 @@ func (p *peer) SendAction(id *identity.Identity, action string) error {
 		return fmt.Errorf("no peers available")
 	}
 
-	err = p.store.AddAction(actionID, action, SelfRemoteAddress)
+	err = n.store.AddAction(actionID, action, SelfRemoteAddress)
 	if err != nil {
 		return fmt.Errorf("send action: saving action: %w", err)
 	}
 
 	wg := sync.WaitGroup{}
 	for _, peer := range peers {
-		if peer.RemoteAddr == p.remoteAddr {
+		if peer.RemoteAddr == n.remoteAddr {
 			continue
 		}
 
@@ -967,27 +947,27 @@ func (p *peer) SendAction(id *identity.Identity, action string) error {
 			req, err := http.NewRequestWithContext(ctxInner, "POST", url, buf)
 			req.Header.Add(HeaderIdentifier, id.Identifier)
 			req.Header.Add(HeaderActionID, actionID)
-			req.Header.Add(HeaderNodeID, p.nodeID)
+			req.Header.Add(HeaderNodeID, n.nodeID)
 			req.Header.Add(HeaderSignature, encodedSig)
 
 			if err != nil {
-				p.logger.Error("send action: creating action request", "error", err, "remote", peer.RemoteAddr)
+				n.logger.Error("send action: creating action request", "error", err, "remote", peer.RemoteAddr)
 				return
 			}
 
-			resp, err := p.client.Do(req)
+			resp, err := n.client.Do(req)
 			if err != nil {
-				p.logger.Error("send action: executing action request", "error", err, "remote", peer.RemoteAddr)
+				n.logger.Error("send action: executing action request", "error", err, "remote", peer.RemoteAddr)
 				return
 			}
 
 			if resp.StatusCode != http.StatusAccepted {
-				p.logger.Error("send action: action request not accepted", "error", err, "remote", peer.RemoteAddr)
+				n.logger.Error("send action: action request not accepted", "error", err, "remote", peer.RemoteAddr)
 				return
 			}
 
-			err = p.store.TouchPeer(peer.RemoteAddr)
-			p.logger.Error("send action: touching peer", "error", err, "remote", peer.RemoteAddr)
+			err = n.store.TouchPeer(peer.RemoteAddr)
+			n.logger.Error("send action: touching peer", "error", err, "remote", peer.RemoteAddr)
 		}()
 	}
 	wg.Wait()
@@ -995,15 +975,15 @@ func (p *peer) SendAction(id *identity.Identity, action string) error {
 	return nil
 }
 
-func (p *peer) handleGetCertificate(w http.ResponseWriter, req *http.Request) {
+func (n *node) handleGetCertificate(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get("id")
 	if id == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	p.logger.Info("get certificate", "id", id)
+	n.logger.Info("get certificate", "id", id)
 
-	cert, err := p.store.GetCachedCertificate(id)
+	cert, err := n.store.GetCachedCertificate(id)
 	if err != nil {
 		if errors.Is(err, model.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
@@ -1019,7 +999,7 @@ func (p *peer) handleGetCertificate(w http.ResponseWriter, req *http.Request) {
 	w.Write(data)
 }
 
-func (p *peer) requestCertificate(identifier, remoteAddr string) (*x509.Certificate, error) {
+func (n *node) requestCertificate(identifier, remoteAddr string) (*x509.Certificate, error) {
 	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelFn()
 
@@ -1029,7 +1009,7 @@ func (p *peer) requestCertificate(identifier, remoteAddr string) (*x509.Certific
 		return nil, fmt.Errorf("creating certificate request: %w", err)
 	}
 
-	resp, err := p.client.Do(req)
+	resp, err := n.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing certificate request: %w", err)
 	}

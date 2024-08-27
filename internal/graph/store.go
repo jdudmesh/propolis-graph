@@ -1,4 +1,4 @@
-package executor
+package graph
 
 import (
 	"context"
@@ -56,69 +56,69 @@ func createSchema(db *sqlx.DB) error {
 		RelationLabelsIdx1_up     string
 	}{
 		Nodes_up: `create table nodes (
-		id text not null primary key,
-		created_at datetime not null,
-		updated_at datetime null
-	);`,
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);`,
 
 		NodeAttributes_up: `create table node_attributes (
-		id text not null primary key,
-		created_at datetime not null,
-		updated_at datetime null,
-		node_id text not null,
-		attr_name text not null,
-		attr_value text not null,
-		data_type int not null,
-		foreign key(node_id) references nodes(id)
-	);`,
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			node_id text not null,
+			attr_name text not null,
+			attr_value text not null,
+			data_type int not null,
+			foreign key(node_id) references nodes(id)
+		);`,
 
 		NodeAttributesIdx1_up: `create index idx_nodes_attributes_attr_name on node_attributes(attr_name);`,
 
 		NodeLabels_up: `create table node_labels (
-		id text not null primary key,
-		created_at datetime not null,
-		updated_at datetime null,
-		node_id text not null,
-		label text not null,
-		foreign key(node_id) references nodes(id)
-	);`,
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			node_id text not null,
+			label text not null,
+			foreign key(node_id) references nodes(id)
+		);`,
 
 		NodeLabelsIdx1_up: `create index idx_node_labels_label on node_labels(label);`,
 
 		Relations_up: `create table relations (
-		id text not null primary key,
-		created_at datetime not null,
-		updated_at datetime null,
-		left_node_id text not null,
-		right_node_id text not null,
-		direction int not null,
-		foreign key(left_node_id) references nodes(id),
-		foreign key(right_node_id) references nodes(id)
-	);`,
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			left_node_id text not null,
+			right_node_id text not null,
+			direction int not null,
+			foreign key(left_node_id) references nodes(id),
+			foreign key(right_node_id) references nodes(id)
+		);`,
 
 		RelationsIdx1_up: `create index idx_relations_direction on relations(direction);`,
 
 		RelationAttributes_up: `create table relation_attributes (
-		id text not null primary key,
-		created_at datetime not null,
-		updated_at datetime null,
-		relation_id text not null,
-		attr_name text not null,
-		attr_value text not null,
-		data_type int not null,
-		foreign key(relation_id) references relations(id)
-	);`,
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			relation_id text not null,
+			attr_name text not null,
+			attr_value text not null,
+			data_type int not null,
+			foreign key(relation_id) references relations(id)
+		);`,
 
 		RelationAttributesIdx1_up: `create index idx_relation_attributes_attr_name on relation_attributes(attr_name);`,
 
 		RelationLabels_up: `create table relation_labels(
-		id text not null primary key,
-		created_at datetime not null,
-		updated_at datetime null,
-		relation_id text not null,
-		label text not null,
-		foreign key(relation_id) references relations(id)
-	);`,
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			relation_id text not null,
+			label text not null,
+			foreign key(relation_id) references relations(id)
+		);`,
 
 		RelationLabelsIdx1_up: `create index relation_labels_label on relation_labels(label);`,
 	}
@@ -134,7 +134,7 @@ func createSchema(db *sqlx.DB) error {
 	}
 
 	err = m.Up()
-	if !errors.Is(err, migrate.ErrNoChange) {
+	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return err
 	}
 

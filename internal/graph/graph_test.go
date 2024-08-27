@@ -1,4 +1,4 @@
-package executor
+package graph
 
 /*
 Copyright © 2024 John Dudmesh <john@dudmesh.co.uk>
@@ -36,7 +36,7 @@ func TestExecutorCRUD(t *testing.T) {
 
 	ids := []string{}
 	t.Run("create", func(t *testing.T) {
-		e, err := New(databaseUrl, logger)
+		e, err := New(config)
 		assert.NoError(err)
 		assert.NotNil(e)
 
@@ -51,7 +51,7 @@ func TestExecutorCRUD(t *testing.T) {
 
 	t.Run("update", func(t *testing.T) {
 		// make sure previous insert found
-		e, err := New(databaseUrl, logger)
+		e, err := New(config)
 		assert.NoError(err)
 		assert.NotNil(e)
 
@@ -74,7 +74,7 @@ func TestExecutorSearch(t *testing.T) {
 	p, err := ast.Parse(testStmt1)
 	assert.NoError(err)
 
-	e, err := New(databaseUrl, logger)
+	e, err := New(config)
 	assert.NoError(err)
 	assert.NotNil(e)
 
@@ -89,7 +89,7 @@ func TestExecutorSearch(t *testing.T) {
 		assert.NoError(err)
 		assert.NotNil(p.Command())
 
-		e, err := New(databaseUrl, logger)
+		e, err := New(config)
 		assert.NoError(err)
 		assert.NotNil(e)
 

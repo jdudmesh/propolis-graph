@@ -9,7 +9,7 @@ import (
 func TestCreateIdentity(t *testing.T) {
 	assert := assert.New(t)
 
-	databaseUrl := "file::memory:?cache=shared"
+	databaseUrl := "file::identity.db?mode=memory&cache=shared"
 	//cwd := os.Getenv("WORKSPACE_DIR")
 	//databaseUrl := fmt.Sprintf("file:%s/data/identity.db?mode=rwc&_secure_delete=true", cwd)
 	store, err := NewStore(databaseUrl)

@@ -14,19 +14,21 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
-package executor
+package graph
 
 import (
-	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"path"
 	"testing"
+
+	"github.com/jdudmesh/propolis/internal/model"
 )
 
 var databaseUrl string
 var logger *slog.Logger
+var config model.NodeConfig
 
 func TestMain(m *testing.M) {
 	log.Println("Setting up test environment")
@@ -45,9 +47,14 @@ func TestMain(m *testing.M) {
 	}
 	logger = slog.New(slog.NewTextHandler(os.Stdout, opts))
 
-	cur := os.Getenv("WORKSPACE_DIR")
-	//dbConn := "file::memory:?cache=shared"
-	databaseUrl = fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cur)
+	databaseURL := "file::graph.db?mode=memory&cache=shared"
+	//cwd := os.Getenv("WORKSPACE_DIR")
+	//databaseUrl = fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cwd)
+
+	config = model.NodeConfig{
+		GraphDatabaseURL: databaseURL,
+		Logger:           logger,
+	}
 
 	m.Run()
 }

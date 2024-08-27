@@ -17,8 +17,10 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package cmd
 
 import (
+	"fmt"
 	"sync"
 
+	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
 )
@@ -27,58 +29,66 @@ var seedCmd = &cobra.Command{
 	Use:   "seed",
 	Short: "Propolis seed server",
 	Long:  `Run propolis in seed mode`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		host, err := cmd.Flags().GetString("host")
 		if err != nil {
-			panic(err) //TODO: handle error
+			return fmt.Errorf("no host: %w", err)
 		}
 
 		port, err := cmd.Flags().GetInt("port")
 		if err != nil {
-			panic(err) //TODO: handle error
+			return fmt.Errorf("no port: %w", err)
 		}
 
-		databaseURL, err := cmd.Flags().GetString("db")
+		nodeDatabaseURL, err := cmd.Flags().GetString("ndb")
 		if err != nil {
-			panic(err) //TODO: handle error
+			return fmt.Errorf("no db: %w", err)
 		}
 
-		migrationsDir, err := cmd.Flags().GetString("migrations")
+		graphDatabaseURL, err := cmd.Flags().GetString("gdb")
 		if err != nil {
-			panic(err) //TODO: handle error
+			return fmt.Errorf("no db: %w", err)
 		}
 
 		seeds, err := cmd.Flags().GetStringArray("seed")
 		if err != nil {
-			panic(err) //TODO: handle error
+			return fmt.Errorf("no seeds specified: %w", err)
 		}
 
-		h, err := node.NewSeed(host, port, databaseURL, migrationsDir, logger)
+		config := model.NodeConfig{
+			Type:             model.NodeTypeSeed,
+			Host:             host,
+			Port:             port,
+			Logger:           logger,
+			NodeDatabaseURL:  nodeDatabaseURL,
+			GraphDatabaseURL: graphDatabaseURL,
+		}
+		h, err := node.New(config)
 		if err != nil {
-			logger.Error("creating peer", "error", err)
-			return
+			return fmt.Errorf("creating peer: %w", err)
 		}
 
 		err = h.SetInitialSeeds(seeds)
 		if err != nil {
-			logger.Error("setting initial seeds", "error", err)
-			return
+			return fmt.Errorf("setting initial seeds: %w", err)
 		}
 
 		wg := sync.WaitGroup{}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := h.Run()
+			err = h.Run()
 			if err != nil {
-				logger.Error("starting peer", "error", err)
-				panic("unable to start peer")
+				err = fmt.Errorf("startting peer: %w", err)
 			}
 		}()
+
 		wg.Wait()
+
+		return err
 	},
 }
 
 func init() {
-	baseCmd.AddCommand(cacheCmd)
+	baseCmd.AddCommand(seedCmd)
 }

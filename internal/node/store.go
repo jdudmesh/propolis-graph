@@ -26,6 +26,8 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
+	"github.com/golang-migrate/migrate/v4/source/reflect"
+
 	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -37,13 +39,13 @@ type store struct {
 	db *sqlx.DB
 }
 
-func newStore(databaseURL, migrationsDir string) (*store, error) {
+func newStore(databaseURL string) (*store, error) {
 	db, err := sqlx.Connect("sqlite3", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
 
-	err = createSchema(db, migrationsDir)
+	err = createSchema(db)
 	if err != nil {
 		return nil, fmt.Errorf("creating schema: %w", err)
 	}
@@ -55,22 +57,93 @@ func newStore(databaseURL, migrationsDir string) (*store, error) {
 	return store, nil
 }
 
-func createSchema(db *sqlx.DB, migrationsDir string) error {
+func createSchema(db *sqlx.DB) error {
 	driver, err := sqlite3.WithInstance(db.DB, &sqlite3.Config{})
 	if err != nil {
 		return fmt.Errorf("creating driver: %w", err)
 	}
 
-	m, err := migrate.NewWithDatabaseInstance(
-		"file://"+migrationsDir,
-		"sqlite3", driver)
+	schema := &struct {
+		Seeds_up            string
+		LocalSubs_up        string
+		Peers_up            string
+		Subs_up             string
+		SubsIdx1_up         string
+		SubsIdx2_up         string
+		Actions_up          string
+		ActionsIdx1_up      string
+		PendingSubs_up      string
+		CertificateCache_up string
+	}{
+		Seeds_up: `create table seeds (
+			remote_addr text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);`,
 
+		LocalSubs_up: `create table local_subs (
+			spec text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);`,
+
+		Peers_up: `create table peers (
+			remote_addr text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null
+		);`,
+
+		Subs_up: `create table subs (
+			remote_addr text not null,
+			spec text not null,
+			created_at datetime not null,
+			updated_at datetime null,
+			primary key(remote_addr, spec),
+			foreign key(remote_addr) references peers(remote_addr)
+		);`,
+
+		SubsIdx1_up: `create index idx_subs_peerspec on subs(remote_addr, spec);`,
+		SubsIdx2_up: `create index idx_subs_spec on subs(spec);`,
+
+		Actions_up: `create table actions (
+			id text not null primary key,
+			created_at datetime not null,
+			updated_at datetime null,
+			action text not null,
+			remote_addr text not null
+		);`,
+
+		ActionsIdx1_up: `create index idx_actions_peer on actions(remote_addr);`,
+
+		PendingSubs_up: `create table pending_subs (
+			remote_addr text not null,
+			spec text not null,
+			created_at datetime not null,
+			updated_at datetime null,
+			primary key(remote_addr, spec),
+			foreign key(remote_addr) references peers(remote_addr)
+		);`,
+
+		CertificateCache_up: `create table certificate_cache (
+				id text not null primary key,
+				created_at datetime not null,
+				updated_at datetime null,
+				certificate blob not null
+		);`,
+	}
+
+	source, err := reflect.New(schema)
+	if err != nil {
+		return fmt.Errorf("creating migration source driver: %w", err)
+	}
+
+	m, err := migrate.NewWithInstance("reflect", source, "sqlite3", driver)
 	if err != nil {
 		return fmt.Errorf("creating migration: %w", err)
 	}
 
 	err = m.Up()
-	if !errors.Is(err, migrate.ErrNoChange) {
+	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return err
 	}
 

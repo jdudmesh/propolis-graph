@@ -14,7 +14,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 */
-package executor
+package graph
 
 import (
 	"context"
@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/jdudmesh/propolis/internal/ast"
+	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jmoiron/sqlx"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 )
@@ -40,14 +41,14 @@ type executor struct {
 	logger *slog.Logger
 }
 
-func New(databaseURL string, logger *slog.Logger) (*executor, error) {
-	s, err := newStore(databaseURL)
+func New(config model.NodeConfig) (*executor, error) {
+	s, err := newStore(config.GraphDatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
 
 	return &executor{
-		logger: logger,
+		logger: config.Logger,
 		store:  s,
 	}, nil
 }

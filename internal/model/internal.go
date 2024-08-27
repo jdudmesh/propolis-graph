@@ -18,6 +18,7 @@ package model
 
 import (
 	"errors"
+	"log/slog"
 	"time"
 )
 
@@ -64,3 +65,20 @@ const (
 	Hub PeerType = iota
 	Client
 )
+
+type NodeType int
+
+const (
+	NodeTypeSeed NodeType = iota
+	NodeTypePeer
+	NodeTypeCache
+)
+
+type NodeConfig struct {
+	Host             string
+	Port             int
+	NodeDatabaseURL  string
+	GraphDatabaseURL string
+	Logger           *slog.Logger
+	Type             NodeType
+}
