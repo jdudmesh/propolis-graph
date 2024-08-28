@@ -18,9 +18,13 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
-	"github.com/jdudmesh/propolis/internal/model"
+	"github.com/jdudmesh/propolis/internal/bloom"
+	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
 )
@@ -45,6 +49,11 @@ var seedCmd = &cobra.Command{
 			return fmt.Errorf("no memory flag: %w", err)
 		}
 
+		publicAddr, err := cmd.Flags().GetString("public")
+		if err != nil {
+			return fmt.Errorf("no public address: %w", err)
+		}
+
 		var nodeDatabaseURL, graphDatabaseURL string
 		if isMemory {
 			nodeDatabaseURL = fmt.Sprintf("file:node%d.db?mode=memory&cache=shared&_secure_delete=true", port)
@@ -65,22 +74,24 @@ var seedCmd = &cobra.Command{
 			return fmt.Errorf("no seeds specified: %w", err)
 		}
 
-		config := model.NodeConfig{
-			Type:             model.NodeTypeSeed,
-			Host:             host,
-			Port:             port,
-			Logger:           logger,
-			NodeDatabaseURL:  nodeDatabaseURL,
-			GraphDatabaseURL: graphDatabaseURL,
-		}
-		h, err := node.New(config)
-		if err != nil {
-			return fmt.Errorf("creating peer: %w", err)
+		config := node.Config{
+			Config: graph.Config{
+				Logger:           logger,
+				GraphDatabaseURL: graphDatabaseURL,
+			},
+			Type:            node.NodeTypeSeed,
+			Host:            host,
+			Port:            port,
+			PublicAddress:   publicAddr,
+			NodeDatabaseURL: nodeDatabaseURL,
+			Seeds:           seeds,
 		}
 
-		err = h.SetInitialSeeds(seeds)
+		filter := bloom.New()
+
+		h, err := node.New(config, filter)
 		if err != nil {
-			return fmt.Errorf("setting initial seeds: %w", err)
+			return fmt.Errorf("creating peer: %w", err)
 		}
 
 		wg := sync.WaitGroup{}
@@ -93,6 +104,15 @@ var seedCmd = &cobra.Command{
 			}
 		}()
 
+		sigint := make(chan os.Signal, 1)
+		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		s := <-sigint
+		logger.Info("stopping server", "signal", s)
+		err = h.Close()
+		if err != nil {
+			logger.Error("shutting down main server", "error", err)
+		}
+
 		wg.Wait()
 
 		return err
@@ -100,5 +120,6 @@ var seedCmd = &cobra.Command{
 }
 
 func init() {
+	seedCmd.Flags().String("public", "127.0.0.1:9000", "Public IP address")
 	baseCmd.AddCommand(seedCmd)
 }

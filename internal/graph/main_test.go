@@ -22,13 +22,11 @@ import (
 	"os"
 	"path"
 	"testing"
-
-	"github.com/jdudmesh/propolis/internal/model"
 )
 
 var databaseUrl string
 var logger *slog.Logger
-var config model.NodeConfig
+var config Config
 
 func TestMain(m *testing.M) {
 	log.Println("Setting up test environment")
@@ -51,7 +49,7 @@ func TestMain(m *testing.M) {
 	//cwd := os.Getenv("WORKSPACE_DIR")
 	//databaseUrl = fmt.Sprintf("file:%s/data/propolis.db?mode=rwc&_secure_delete=true", cwd)
 
-	config = model.NodeConfig{
+	config = Config{
 		GraphDatabaseURL: databaseURL,
 		Logger:           logger,
 	}

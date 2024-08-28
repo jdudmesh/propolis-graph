@@ -29,19 +29,23 @@ import (
 	"github.com/jdudmesh/propolis/internal/ast"
 	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jmoiron/sqlx"
-	gonanoid "github.com/matoous/go-nanoid/v2"
 )
 
 var (
 	ErrNotFound = errors.New("not found")
 )
 
+type Config struct {
+	GraphDatabaseURL string
+	Logger           *slog.Logger
+}
+
 type executor struct {
 	store  *store
 	logger *slog.Logger
 }
 
-func New(config model.NodeConfig) (*executor, error) {
+func New(config Config) (*executor, error) {
 	s, err := newStore(config.GraphDatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
@@ -100,12 +104,8 @@ func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 	}
 
 	if node == nil {
-		id, err := gonanoid.New()
-		if err != nil {
-			return nil, fmt.Errorf("node id: %w", err)
-		}
 		node = &Node{
-			ID:        id,
+			ID:        model.NewID(),
 			CreatedAt: now,
 		}
 	} else {
@@ -155,12 +155,8 @@ func (e *executor) finaliseNodeLabels(nodeID string, n ast.Entity, tx *sqlx.Tx) 
 	for _, l := range n.Labels() {
 		label := existing[l]
 		if label == nil {
-			id, err := gonanoid.New()
-			if err != nil {
-				return nil, fmt.Errorf("label id: %w", err)
-			}
 			label = &NodeLabel{
-				ID:        id,
+				ID:        model.NewID(),
 				CreatedAt: now,
 				NodeID:    nodeID,
 				Label:     l,
@@ -219,12 +215,8 @@ func (e *executor) finaliseNodeAttributes(nodeID string, n ast.Entity, tx *sqlx.
 	for _, a := range n.Attributes() {
 		attr := existing[a.Key()]
 		if attr == nil {
-			id, err := gonanoid.New()
-			if err != nil {
-				return nil, fmt.Errorf("attr id: %w", err)
-			}
 			attr = &NodeAttribute{
-				ID:        id,
+				ID:        model.NewID(),
 				CreatedAt: now,
 				NodeID:    nodeID,
 				Name:      a.Key(),
@@ -283,12 +275,8 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, err
 	}
 
 	if rel == nil {
-		id, err := gonanoid.New()
-		if err != nil {
-			return nil, fmt.Errorf("rel id: %w", err)
-		}
 		rel = &Relation{
-			ID:        id,
+			ID:        model.NewID(),
 			CreatedAt: now,
 		}
 	} else {
@@ -347,12 +335,8 @@ func (e *executor) finaliseRelationLabels(relationID string, r ast.Relation, tx 
 	for _, l := range r.Labels() {
 		label := existing[l]
 		if label == nil {
-			id, err := gonanoid.New()
-			if err != nil {
-				return nil, fmt.Errorf("label id: %w", err)
-			}
 			label = &RelationLabel{
-				ID:         id,
+				ID:         model.NewID(),
 				CreatedAt:  now,
 				RelationID: relationID,
 				Label:      l,
@@ -411,12 +395,8 @@ func (e *executor) finaliseRelationAttributes(relationID string, r ast.Relation,
 	for _, a := range r.Attributes() {
 		attr := existing[a.Key()]
 		if attr == nil {
-			id, err := gonanoid.New()
-			if err != nil {
-				return nil, fmt.Errorf("attr id: %w", err)
-			}
 			attr = &RelationAttribute{
-				ID:         id,
+				ID:         model.NewID(),
 				CreatedAt:  now,
 				RelationID: relationID,
 				Name:       a.Key(),

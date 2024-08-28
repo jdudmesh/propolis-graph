@@ -8,7 +8,7 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
-	"github.com/golang-migrate/migrate/v4/source/reflect"
+	"github.com/jdudmesh/propolis/pkg/migrate/v4/source/reflect"
 	"github.com/jmoiron/sqlx"
 )
 

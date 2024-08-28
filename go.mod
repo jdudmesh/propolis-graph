@@ -3,11 +3,12 @@ module github.com/jdudmesh/propolis
 go 1.22.0
 
 require (
+	github.com/OneOfOne/xxhash v1.2.8
+	github.com/btcsuite/btcutil v1.0.2
+	github.com/bwmarrin/snowflake v0.3.0
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/golang-migrate/migrate/v4 v4.17.1
-	github.com/jdudmesh/migrate v0.0.0-00010101000000-000000000000
 	github.com/jmoiron/sqlx v1.4.0
-	github.com/matoous/go-nanoid/v2 v2.1.0
 	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/quic-go/quic-go v0.45.1
 	github.com/spf13/cobra v1.8.1
@@ -17,8 +18,6 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/OneOfOne/xxhash v1.2.8 // indirect
-	github.com/btcsuite/btcutil v1.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
@@ -53,5 +52,3 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace "github.com/golang-migrate/migrate/v4" => ../migrate

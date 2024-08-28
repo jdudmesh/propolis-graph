@@ -71,6 +71,18 @@ func (p *parser) Command() Command {
 	return p.cmd
 }
 
+func (p *parser) Identifiers() []string {
+	ids := []string{}
+	switch p.cmd.Entity().Type() {
+	case EntityTypeNode:
+		ids = append(ids, p.cmd.Entity().Identifier())
+	case EntityTypeRelation:
+		rel := p.cmd.Entity().(*relation)
+		ids = append(ids, rel.Identifier(), rel.Left().Identifier(), rel.Right().Identifier())
+	}
+	return ids
+}
+
 func (p *parser) pop() item {
 	if p.pos >= len(p.lexer.items) {
 		return item{

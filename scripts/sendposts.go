@@ -17,10 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jdudmesh/propolis/internal/bloom"
+	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jdudmesh/propolis/internal/node"
-	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
@@ -34,12 +35,12 @@ var nodeID string
 type Peer interface {
 	Run() error
 	CountOfPeers() (int, error)
-	SendIdentity(id *identity.Identity) error
-	SendAction(id *identity.Identity, action string) error
+	PublishIdentity(id *identity.Identity) error
+	Publish(id *identity.Identity, action string) error
 }
 
 func main() {
-	nodeID = gonanoid.Must()
+	nodeID = model.NewID()
 
 	db, err := sqlx.Connect("mysql", "root:CKYwALUCTIOnEsiNGTRoTiO@tcp(127.0.0.1:3306)/notthetalk")
 	if err != nil {
@@ -111,7 +112,7 @@ func main() {
 		time.Sleep(1 * time.Second)
 	}
 
-	err = peer.SendIdentity(id)
+	err = peer.PublishIdentity(id)
 	if err != nil {
 		panic(err)
 	}
@@ -129,24 +130,30 @@ func createPeer() (Peer, error) {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, opts))
 
-	config := model.NodeConfig{
-		Type:             model.NodeTypePeer,
-		Host:             "127.0.0.1",
-		Port:             9003,
-		Logger:           logger,
-		NodeDatabaseURL:  "file::node9003.db?mode=memory&cache=shared",
-		GraphDatabaseURL: "file::graph9003.db?mode=memory&cache=shared",
+	config := node.Config{
+		Config: graph.Config{
+			Logger:           logger,
+			GraphDatabaseURL: "file::graph9003.db?mode=memory&cache=shared",
+		},
+		Type:            node.NodeTypePeer,
+		Host:            "127.0.0.1",
+		Port:            9003,
+		NodeDatabaseURL: "file::node9003.db?mode=memory&cache=shared",
+		Seeds:           []string{"127.0.0.1:9000"},
 	}
-	peer, err := node.New(config)
+
+	filter := bloom.New()
+	filter.Set([]byte("hello"))
+
+	peer, err := node.New(config, filter)
 	if err != nil {
 		return nil, err
 	}
 
-	peer.SetInitialSeeds([]string{"127.0.0.1:9000"})
 	return peer, nil
 }
 
-func sendIdentity(peer Peer, id *identity.Identity) error {
+func PublishIdentity(peer Peer, id *identity.Identity) error {
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.CertificateData}))
 	certPEMEncoded, err := json.Marshal(certPEM)
 	if err != nil {
@@ -165,7 +172,7 @@ func sendIdentity(peer Peer, id *identity.Identity) error {
 	sb.WriteString(strings.Join(props, ", "))
 	sb.WriteString("})")
 
-	err = peer.SendAction(id, sb.String())
+	err = peer.Publish(id, sb.String())
 	if err != nil {
 		return err
 	}
@@ -217,7 +224,7 @@ func postAction(id *identity.Identity, action string) error {
 		log.Fatalf("No private key found")
 	}
 
-	actionID := gonanoid.Must()
+	actionID := model.NewID()
 	h := sha256.New()
 	h.Write([]byte(id.Identifier))
 	h.Write([]byte(actionID))

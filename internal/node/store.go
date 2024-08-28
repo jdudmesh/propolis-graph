@@ -26,7 +26,7 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
-	"github.com/golang-migrate/migrate/v4/source/reflect"
+	"github.com/jdudmesh/propolis/pkg/migrate/v4/source/reflect"
 
 	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jmoiron/sqlx"
@@ -65,45 +65,25 @@ func createSchema(db *sqlx.DB) error {
 
 	schema := &struct {
 		Seeds_up            string
-		LocalSubs_up        string
 		Peers_up            string
-		Subs_up             string
-		SubsIdx1_up         string
-		SubsIdx2_up         string
 		Actions_up          string
 		ActionsIdx1_up      string
-		PendingSubs_up      string
 		CertificateCache_up string
 	}{
 		Seeds_up: `create table seeds (
 			remote_addr text not null primary key,
 			created_at datetime not null,
-			updated_at datetime null
-		);`,
-
-		LocalSubs_up: `create table local_subs (
-			spec text not null primary key,
-			created_at datetime not null,
-			updated_at datetime null
+			updated_at datetime null,
+			node_id text not null
 		);`,
 
 		Peers_up: `create table peers (
 			remote_addr text not null primary key,
 			created_at datetime not null,
-			updated_at datetime null
-		);`,
-
-		Subs_up: `create table subs (
-			remote_addr text not null,
-			spec text not null,
-			created_at datetime not null,
 			updated_at datetime null,
-			primary key(remote_addr, spec),
-			foreign key(remote_addr) references peers(remote_addr)
+			node_id text not null,
+			filter text not null
 		);`,
-
-		SubsIdx1_up: `create index idx_subs_peerspec on subs(remote_addr, spec);`,
-		SubsIdx2_up: `create index idx_subs_spec on subs(spec);`,
 
 		Actions_up: `create table actions (
 			id text not null primary key,
@@ -114,15 +94,6 @@ func createSchema(db *sqlx.DB) error {
 		);`,
 
 		ActionsIdx1_up: `create index idx_actions_peer on actions(remote_addr);`,
-
-		PendingSubs_up: `create table pending_subs (
-			remote_addr text not null,
-			spec text not null,
-			created_at datetime not null,
-			updated_at datetime null,
-			primary key(remote_addr, spec),
-			foreign key(remote_addr) references peers(remote_addr)
-		);`,
 
 		CertificateCache_up: `create table certificate_cache (
 				id text not null primary key,
@@ -150,7 +121,7 @@ func createSchema(db *sqlx.DB) error {
 	return nil
 }
 
-func (s *store) UpsertSeeds(seeds []string) error {
+func (s *store) UpsertSeeds(seeds []*model.SeedSpec) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -169,7 +140,7 @@ func (s *store) UpsertSeeds(seeds []string) error {
 	}
 
 	for _, s := range seeds {
-		_, err = tx.Exec("insert into seeds(remote_addr, created_at) values(?, ?)", s, time.Now().UTC())
+		_, err = tx.NamedExec("insert into seeds(remote_addr, created_at, node_id) values(:remote_addr, :created_at, :node_id)", s)
 		if err != nil {
 			err2 := tx.Rollback()
 			if err2 != nil {
@@ -187,66 +158,33 @@ func (s *store) UpsertSeeds(seeds []string) error {
 	return nil
 }
 
-func (s *store) InitSubs(subs []string) error {
-	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancelFn()
-
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("saving subs (begin): %w", err)
-	}
-
-	_, err = tx.Exec("delete from local_subs")
-	if err != nil {
-		err2 := tx.Rollback()
-		if err2 != nil {
-			return fmt.Errorf("saving local_subs (rollback): %w", err)
-		}
-		return fmt.Errorf("saving local_subs (delete): %w", err)
-	}
-
-	now := time.Now().UTC()
-	for _, sub := range subs {
-		_, err := tx.Exec(`insert into local_subs(spec, created_at)
-			values (?, ?)
-			on conflict(spec) do update set updated_at = ?
-			`, sub, now, now)
-
-		if err != nil {
-			err2 := tx.Rollback()
-			if err2 != nil {
-				return fmt.Errorf("saving local_subs (rollback): %w", err)
-			}
-			return fmt.Errorf("saving local_subs (insert): %w", err)
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("saving local_subs (commit): %w", err)
-	}
-
-	return nil
-}
-
-func (s *store) GetSeeds() ([]*model.PeerSpec, error) {
+func (s *store) GetSeeds() ([]*model.SeedSpec, error) {
 	rows, err := s.db.Queryx(`select * from seeds`)
 	if err != nil {
 		return nil, fmt.Errorf("querying seeds: %w", err)
 	}
 	defer rows.Close()
 
-	peers := make([]*model.PeerSpec, 0)
+	seeds := make([]*model.SeedSpec, 0)
 	for rows.Next() {
-		s := &model.PeerSpec{}
+		s := &model.SeedSpec{}
 		err = rows.StructScan(s)
 		if err != nil {
 			return nil, fmt.Errorf("scanning peer: %w", err)
 		}
-		peers = append(peers, s)
+		seeds = append(seeds, s)
 	}
 
-	return peers, nil
+	return seeds, nil
+}
+
+func (s *store) TouchSeed(remoteAddr string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(`update seeds set updated_at = ? where remote_addr = ?`, now, remoteAddr)
+	if err != nil {
+		return fmt.Errorf("touch seed: %w", err)
+	}
+	return nil
 }
 
 func (s *store) GetAllPeers() ([]*model.PeerSpec, error) {
@@ -272,11 +210,11 @@ func (s *store) GetAllPeers() ([]*model.PeerSpec, error) {
 	return peers, nil
 }
 
-func (s *store) GetRandomPeers(excluding string) ([]*model.PeerSpec, error) {
+func (s *store) GetRandomPeers(excluding string, maxPeers int) ([]*model.PeerSpec, error) {
 	rows, err := s.db.Queryx(`select *
 		from peers
 		where remote_addr != ?
-		order by coalesce(updated_at, created_at) limit 1000;`, excluding)
+		order by coalesce(updated_at, created_at) limit ?;`, excluding, maxPeers)
 
 	if err != nil {
 		return nil, fmt.Errorf("random peers: %w", err)
@@ -312,13 +250,15 @@ func (s *store) DeleteAgedPeers(before time.Time) error {
 	return nil
 }
 
-func (s *store) UpsertPeer(peer string) error {
+func (s *store) UpsertPeer(peer model.PeerSpec) error {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`
-	insert into peers(remote_addr, created_at)
-	values(?, ?)
-	on conflict(remote_addr) do update set updated_at = ?`,
-		peer, now, now)
+	peer.UpdatedAt = &now
+
+	_, err := s.db.NamedExec(`
+	insert into peers(remote_addr, created_at, node_id, filter)
+	values(:remote_addr, :created_at, :node_id, :filter)
+	on conflict(remote_addr) do update set updated_at = :updated_at
+	`, peer)
 
 	if err != nil {
 		return fmt.Errorf("upsert peer: %w", err)
@@ -327,7 +267,7 @@ func (s *store) UpsertPeer(peer string) error {
 	return nil
 }
 
-func (s *store) UpsertPeers(peers []string) error {
+func (s *store) UpsertPeers(peers []*model.PeerSpec) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -338,11 +278,12 @@ func (s *store) UpsertPeers(peers []string) error {
 
 	now := time.Now().UTC()
 	for _, p := range peers {
-		_, err = tx.Exec(`
-			insert into peers(remote_addr, created_at)
-			values(?, ?)
-			on conflict(remote_addr) do update set updated_at = ?`,
-			p, now, now)
+		p.UpdatedAt = &now
+		_, err := s.db.NamedExec(`
+		insert into peers(remote_addr, created_at, node_id, filter)
+		values(:remote_addr, :created_at, :node_id, :filter)
+		on conflict(remote_addr) do update set updated_at = :updated_at
+		`, p)
 		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("upsert peers (insert peer): %w", err)
@@ -357,296 +298,29 @@ func (s *store) UpsertPeers(peers []string) error {
 	return nil
 }
 
-func (s *store) UpsertPeersForSub(sub string, peers []string) error {
-	existing, err := s.FindPeersBySub(sub)
-	if err != nil {
-		return fmt.Errorf("upsert peers/subs (finding existing): %w", err)
-	}
-
-	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancelFn()
-
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("upsert peers/subs (begin): %w", err)
-	}
-
-	current := map[string]struct{}{}
+func (s *store) TouchPeer(remoteAddr, subsFilter string) error {
+	var err error
 	now := time.Now().UTC()
-	for _, p := range peers {
-		current[p] = struct{}{}
 
-		_, err = tx.Exec(`
-			insert into peers(remote_addr, created_at)
-			values(?, ?)
-			on conflict(remote_addr) do update set updated_at = ?`,
-			p, now, now)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("upsert peers/subs (insert peer): %w", err)
-		}
-
-		_, err = tx.Exec(`insert into subs(
-			remote_addr,
-			spec,
-			created_at)
-			values (?, ?, ?)
-			on conflict(remote_addr, spec) do update set updated_at = ?
-			`, p, sub, now, now)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("upsert peers/subs (insert sub): %w", err)
-		}
+	if subsFilter == "" {
+		_, err = s.db.Exec(`update peers set updated_at = ? where remote_addr = ?`, now, remoteAddr)
+	} else {
+		_, err = s.db.Exec(`update peers set filter = ?, updated_at = ? where remote_addr = ?`, subsFilter, now, remoteAddr)
 	}
 
-	for _, e := range existing {
-		if _, ok := current[e.RemoteAddr]; !ok {
-			_, err = tx.NamedExec(`delete from subs where remote_addr = :remote_addr and spec = :spec`, e)
-			if err != nil {
-				tx.Rollback()
-				return fmt.Errorf("upsert peers/subs (delete old subs): %w", err)
-			}
-		}
-	}
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("upsert peers/subs (commit): %w", err)
-	}
-
-	return nil
-}
-
-func (s *store) GetSelfSubs() ([]*model.SubscriptionSpec, error) {
-	rows, err := s.db.Queryx(`select * from local_subs`)
-	if err != nil {
-		return nil, fmt.Errorf("querying subs: %w", err)
-	}
-	defer rows.Close()
-
-	subs := make([]*model.SubscriptionSpec, 0)
-	for rows.Next() {
-		s := &model.SubscriptionSpec{}
-		err = rows.StructScan(s)
-		if err != nil {
-			return nil, fmt.Errorf("scanning subs: %w", err)
-		}
-		subs = append(subs, s)
-	}
-
-	return subs, nil
-}
-
-func (s *store) FindSubsByRemoteAddr(remoteAddr string) ([]*model.SubscriptionSpec, error) {
-	rows, err := s.db.Queryx(`select * from subs where remote_addr = ?`, remoteAddr)
-
-	if err != nil {
-		return nil, fmt.Errorf("querying subs: %w", err)
-	}
-	defer rows.Close()
-
-	subs := make([]*model.SubscriptionSpec, 0)
-	for rows.Next() {
-		s := &model.SubscriptionSpec{}
-		err = rows.StructScan(s)
-		if err != nil {
-			return nil, fmt.Errorf("scanning subs: %w", err)
-		}
-		subs = append(subs, s)
-	}
-
-	return subs, nil
-}
-
-func (s *store) UpsertSubs(remoteAddr string, subs []string) error {
-	existing, err := s.FindSubsByRemoteAddr(remoteAddr)
-	if err != nil {
-		return fmt.Errorf("upsert subs (finding existing): %w", err)
-	}
-
-	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancelFn()
-
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("upsert subs (begin): %w", err)
-	}
-
-	current := map[string]struct{}{}
-	now := time.Now().UTC()
-	for _, s := range subs {
-		current[s] = struct{}{}
-
-		_, err = tx.Exec(`
-			insert into peers(remote_addr, created_at)
-			values(?, ?)
-			on conflict(remote_addr) do update set updated_at = ?`,
-			remoteAddr, now, now)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("upsert subs (insert peer): %w", err)
-		}
-
-		_, err = tx.Exec(`insert into subs(
-			remote_addr,
-			spec,
-			created_at)
-			values (?, ?, ?)
-			on conflict(remote_addr, spec) do update set updated_at = ?
-			`, remoteAddr, s, now, now)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("upsert subs (insert sub): %w", err)
-		}
-	}
-
-	for _, e := range existing {
-		if _, ok := current[e.Spec]; !ok {
-			_, err = tx.NamedExec(`delete from subs where remote_addr = :remote_addr and spec = :spec`, e)
-			if err != nil {
-				tx.Rollback()
-				return fmt.Errorf("upsert subs (delete old subs): %w", err)
-			}
-		}
-	}
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("upsert subs(commit): %w", err)
-	}
-
-	return nil
-}
-
-func (s *store) DeleteSubs(remoteAddr string, subs []string) error {
-	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancelFn()
-
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("delete subs (begin): %w", err)
-	}
-
-	for _, s := range subs {
-		_, err := tx.Exec(`delete from subs where remote_addr = ? and spec = ?`, remoteAddr, s)
-		if err != nil {
-			tx.Rollback()
-			return fmt.Errorf("delete subs (delete old subs): %w", err)
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("delete subs(commit): %w", err)
-	}
-
-	return nil
-}
-
-func (s *store) FindPeersBySub(sub string) ([]*model.PeerSpec, error) {
-	rows, err := s.db.Queryx(`
-		select p.*
-		from subs s
-		inner join peers p
-		on s.remote_addr = p.remote_addr
-		where s.spec = ?`, sub)
-
-	if err != nil {
-		return nil, fmt.Errorf("querying subs: %w", err)
-	}
-	defer rows.Close()
-
-	peers := make([]*model.PeerSpec, 0)
-	for rows.Next() {
-		s := &model.PeerSpec{}
-		err = rows.StructScan(s)
-		if err != nil {
-			return nil, fmt.Errorf("scanning peer: %w", err)
-		}
-		peers = append(peers, s)
-	}
-
-	return peers, nil
-}
-
-func (s *store) AddAction(id, action, remoteAddr string) error {
-	_, err := s.db.Exec(`
-		insert into actions (id, created_at, action, remote_addr)
-		values(?, ?, ?, ?)
-	`, id, time.Now().UTC(), action, remoteAddr)
-	return err
-}
-
-func (s *store) AddPendingPeer(remoteAddr string, sub string) error {
-	now := time.Now().UTC()
-	_, err := s.db.Exec(`insert into pending_subs(
-		remote_addr,
-		spec,
-		created_at)
-		values (?, ?, ?)
-		on conflict(remote_addr, spec) do update set updated_at = ?
-		`, remoteAddr, sub, now, now)
-	if err != nil {
-		return fmt.Errorf("add pending_subs (insert sub): %w", err)
-	}
-
-	return nil
-}
-
-func (s *store) RemovePendingPeer(remoteAddr string, sub string) error {
-	_, err := s.db.Exec(`delete from pending_subs where remote_addr = ? and spec = ?`, remoteAddr, sub)
-	if err != nil {
-		return fmt.Errorf("delete pending_subs: %w", err)
-	}
-	return nil
-}
-
-func (s *store) GetPendingPeersForSub(sub string) ([]*model.SubscriptionSpec, error) {
-	rows, err := s.db.Queryx(`
-		select *
-		from pending_subs
-		where spec = ?`, sub)
-
-	if err != nil {
-		return nil, fmt.Errorf("querying pending subs: %w", err)
-	}
-	defer rows.Close()
-
-	peers := make([]*model.SubscriptionSpec, 0)
-	for rows.Next() {
-		res := &model.SubscriptionSpec{}
-		err = rows.StructScan(res)
-		if err != nil {
-			return nil, fmt.Errorf("scanning peer: %w", err)
-		}
-		peers = append(peers, res)
-	}
-
-	return peers, nil
-}
-
-func (s *store) TouchPeer(remoteAddr string) error {
-	now := time.Now().UTC()
-	_, err := s.db.Exec(`update peers set updated_at = ? where remote_addr = ?`, now, remoteAddr)
 	if err != nil {
 		return fmt.Errorf("touch peer: %w", err)
 	}
 	return nil
 }
 
-func (s *store) TouchSeed(remoteAddr string) error {
-	now := time.Now().UTC()
-	_, err := s.db.Exec(`update seeds set updated_at = ? where remote_addr = ?`, now, remoteAddr)
+func (s *store) CountOfPeers() (int, error) {
+	var count int
+	err := s.db.Get(&count, `select count(*) from peers`)
 	if err != nil {
-		return fmt.Errorf("touch seed: %w", err)
+		return 0, fmt.Errorf("count of peers: %w", err)
 	}
-	return nil
-}
-
-func (s *store) CreateTx(ctx context.Context) (*sqlx.Tx, error) {
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create tx: %w", err)
-	}
-	return tx, nil
+	return count, nil
 }
 
 func (s *store) PutCachedCertificate(cert *x509.Certificate) error {
@@ -685,11 +359,19 @@ func (s *store) GetCachedCertificate(identifier string) (*x509.Certificate, erro
 	return cert, nil
 }
 
-func (s *store) CountOfPeers() (int, error) {
+func (s *store) CreateAction(action Action) error {
+	_, err := s.db.Exec(`
+		insert into actions (id, created_at, action, remote_addr)
+		values(?, ?, ?, ?)
+	`, action.ID, time.Now().UTC(), action.Action, action.RemoteAddr)
+	return err
+}
+
+func (s *store) IsActionProcessed(id string) (bool, error) {
 	var count int
-	err := s.db.Get(&count, `select count(*) from peers`)
+	err := s.db.Get(&count, `select count(*) from actions where id = ?`, id)
 	if err != nil {
-		return 0, fmt.Errorf("count of peers: %w", err)
+		return false, fmt.Errorf("is action processed: %w", err)
 	}
-	return count, nil
+	return count > 0, nil
 }

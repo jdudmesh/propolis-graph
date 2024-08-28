@@ -33,6 +33,6 @@ type Action struct {
 }
 
 type JoinResponse struct {
-	Seeds []string `json:"seeds"`
-	Peers []string `json:"peers"`
+	Seeds []*SeedSpec `json:"seeds"`
+	Peers []*PeerSpec `json:"peers"`
 }

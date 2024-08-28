@@ -17,68 +17,55 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 package model
 
 import (
+	"crypto/rand"
 	"errors"
-	"log/slog"
+	"math/big"
 	"time"
+
+	"github.com/bwmarrin/snowflake"
 )
+
+const PROPOLIS_NODE_ID = "PROPOLIS_NODE_ID"
+
+var snowflakeNode *snowflake.Node
+
+func init() {
+	seed, err := rand.Int(rand.Reader, big.NewInt(1023))
+	if err != nil {
+		panic(err)
+	}
+	node, err := snowflake.NewNode(seed.Int64())
+	if err != nil {
+		panic(err)
+	}
+	snowflakeNode = node
+}
+
+func NewID() string {
+	id := snowflakeNode.Generate()
+	return id.Base58()
+}
 
 var ErrAlreadyExists = errors.New("entity already exists")
 var ErrNotFound = errors.New("entity not found")
+var ErrNotAcceptable = errors.New("entity not acceptable")
 
-type HubSpec struct {
-	CreatedAt time.Time  `db:"created_at"`
-	UpdatedAt *time.Time `db:"updated_at"`
-	HostAddr  string     `db:"host_addr"`
+type SeedSpec struct {
+	CreatedAt  time.Time  `db:"created_at"`
+	UpdatedAt  *time.Time `db:"updated_at"`
+	RemoteAddr string     `db:"remote_addr"`
+	NodeID     string     `db:"node_id"`
 }
 
 type PeerSpec struct {
 	RemoteAddr string     `db:"remote_addr"`
 	CreatedAt  time.Time  `db:"created_at"`
 	UpdatedAt  *time.Time `db:"updated_at"`
+	NodeID     string     `db:"node_id"`
+	Filter     string     `db:"filter" json:"filter,omitempty"`
 }
 
 type SubscriptionSpec struct {
 	PeerSpec
 	Spec string `db:"spec"`
-}
-
-const (
-	ContentTypeHeader = "Content-Type"
-
-	ContentTypeError     = "x-propolis/error"
-	ContentTypePing      = "x-propolis/ping"
-	ContentTypePong      = "x-propolis/pong"
-	ContentTypeSubscribe = "x-propolis/subscribe"
-
-	ContentTypeJSON = "application/json; utf-8"
-)
-
-type ConnectionStatus int
-type PeerType int
-
-const (
-	ConnectionStatusNotConnected ConnectionStatus = iota
-	ConnectionStatusConnecting
-	ConnectionStatusDisconnecting
-	ConnectionStatusConnected
-
-	Hub PeerType = iota
-	Client
-)
-
-type NodeType int
-
-const (
-	NodeTypeSeed NodeType = iota
-	NodeTypePeer
-	NodeTypeCache
-)
-
-type NodeConfig struct {
-	Host             string
-	Port             int
-	NodeDatabaseURL  string
-	GraphDatabaseURL string
-	Logger           *slog.Logger
-	Type             NodeType
 }

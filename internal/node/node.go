@@ -19,14 +19,11 @@ package node
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -41,10 +38,10 @@ import (
 	"time"
 
 	"github.com/jdudmesh/propolis/internal/ast"
+	"github.com/jdudmesh/propolis/internal/bloom"
 	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/identity"
 	"github.com/jdudmesh/propolis/internal/model"
-	gonanoid "github.com/matoous/go-nanoid/v2"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
@@ -58,8 +55,10 @@ const (
 	HeaderSender        = "x-propolis-sender"
 	HeaderSignature     = "x-propolis-signature"
 	HeaderIdentifier    = "x-propolis-identifier"
+	HeaderReceivedFrom  = "x-propolis-received-from"
 
 	SelfRemoteAddress = "0.0.0.0"
+	MaxPeers          = 5
 )
 
 type Graph interface {
@@ -67,13 +66,16 @@ type Graph interface {
 }
 
 type Action struct {
-	ID          string
-	RemoteAddr  string
-	NodeID      string
-	Timestamp   time.Time
-	Action      string
-	Command     ast.Command
-	Certificate x509.Certificate
+	ID               string
+	RemoteAddr       string
+	NodeID           string
+	Identity         string
+	Timestamp        time.Time
+	Action           string
+	Command          ast.Command
+	Certificate      x509.Certificate
+	ReceivedFrom     string
+	EncodedSignature string
 }
 
 type node struct {
@@ -88,31 +90,39 @@ type node struct {
 	notifyPendingPeers chan string
 	actionQueue        chan Action
 	quit               chan struct{}
-	remoteAddr         string
-	nodeType           model.NodeType
+	publicAddr         string
+	nodeType           NodeType
 	executor           Graph
+	subscriptions      *bloom.Filter
+	seeds              []string
+	identity           identity.Identity
 }
 
-func New(config model.NodeConfig) (*node, error) {
+func New(config Config, subscriptions *bloom.Filter) (*node, error) {
+	if subscriptions == nil {
+		subscriptions = bloom.New()
+	}
+
 	store, err := newStore(config.NodeDatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("creating store: %w", err)
 	}
 
-	executor, err := graph.New(config)
+	executor, err := graph.New(config.Config)
 	if err != nil {
 		return nil, fmt.Errorf("creating executor: %w", err)
 	}
 
-	nodeID, err := gonanoid.New()
-	if err != nil {
-		return nil, fmt.Errorf("generating node id: %w", err)
+	publicAddr := config.PublicAddress
+	if publicAddr == "" && config.Type == NodeTypeSeed {
+		publicAddr = fmt.Sprintf("%s:%d", config.Host, config.Port)
 	}
 
 	n := &node{
-		nodeID:             nodeID,
+		nodeID:             model.NewID(),
 		host:               config.Host,
 		port:               config.Port,
+		publicAddr:         publicAddr,
 		store:              store,
 		logger:             config.Logger,
 		nodeType:           config.Type,
@@ -120,6 +130,9 @@ func New(config model.NodeConfig) (*node, error) {
 		notifyPendingPeers: make(chan string),
 		actionQueue:        make(chan Action),
 		quit:               make(chan struct{}),
+		subscriptions:      subscriptions,
+		seeds:              config.Seeds,
+		identity:           config.Identity,
 	}
 
 	n.server = &http3.Server{
@@ -129,29 +142,76 @@ func New(config model.NodeConfig) (*node, error) {
 	return n, nil
 }
 
-func (n *node) SetInitialSeeds(seeds []string) error {
-	return n.store.UpsertSeeds(seeds)
+func (n *node) setInitialSeeds() error {
+	s := make([]*model.SeedSpec, 0, len(n.seeds))
+	for _, seed := range n.seeds {
+		spec, err := n.getNodeInfo(seed)
+		if err != nil {
+			n.logger.Error("getting seed info", "error", err)
+			continue
+		}
+
+		s = append(s, &model.SeedSpec{
+			CreatedAt:  spec.CreatedAt,
+			UpdatedAt:  spec.UpdatedAt,
+			RemoteAddr: seed,
+			NodeID:     spec.NodeID,
+		})
+	}
+	return n.store.UpsertSeeds(s)
 }
 
-func (n *node) SetInitialSubscriptions(subs []string) error {
-	return n.store.InitSubs(subs)
+func (n *node) getNodeInfo(remoteAddr string) (*model.PeerSpec, error) {
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancelFn()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("https://%s/whoami", remoteAddr), nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating whoami request: %w", err)
+	}
+
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("getting whoami: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad whoami response: %d", resp.StatusCode)
+	}
+
+	if n.publicAddr == "" {
+		n.publicAddr = resp.Header.Get(HeaderRemoteAddress)
+	}
+
+	body := resp.Body
+	defer body.Close()
+
+	spec := &model.PeerSpec{}
+	dec := json.NewDecoder(body)
+	err = dec.Decode(spec)
+	if err != nil {
+		return nil, fmt.Errorf("decoding whoami: %w", err)
+	}
+
+	return spec, nil
 }
 
 func (n *node) newServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	switch n.nodeType {
-	case model.NodeTypeSeed:
+	case NodeTypeSeed:
 		mux.HandleFunc("POST /hello", n.handleJoin)
 		mux.HandleFunc("POST /goodbye", n.handleLeave)
 		mux.HandleFunc("GET /whois/{id}", n.handleWhoIs)
-	case model.NodeTypePeer:
+		mux.HandleFunc("GET /whoami", n.handleWhoAmI)
+	case NodeTypePeer:
 		// mux.HandleFunc("POST /subscription", n.handleCreateSubscription)
 		// mux.HandleFunc("DELETE /subscription", n.handleDeleteSubscription)
 		// mux.HandleFunc("POST /subscription/peer", n.handleSubscriptionPeerUpdate)
 		mux.HandleFunc("POST /ping", n.handlePing)
 		mux.HandleFunc("POST /pong", n.handlePong)
 		mux.HandleFunc("GET /whois/{id}", n.handleWhoIs)
-		mux.HandleFunc("POST /action", n.handleCreateAction)
+		mux.HandleFunc("POST /publish", n.handlePublish)
 	}
 	return mux
 }
@@ -161,9 +221,9 @@ func (n *node) Run() error {
 
 	addr := &net.UDPAddr{IP: net.ParseIP(n.host), Port: n.port}
 	switch n.nodeType {
-	case model.NodeTypePeer:
+	case NodeTypePeer:
 		n.logger.Info("starting peer", "addr", addr)
-	case model.NodeTypeSeed:
+	case NodeTypeSeed:
 		n.logger.Info("starting seed", "addr", addr)
 	}
 
@@ -211,11 +271,11 @@ func (n *node) Run() error {
 	}()
 
 	switch n.nodeType {
-	case model.NodeTypePeer:
+	case NodeTypePeer:
 		return n.runLoopPeer()
-	case model.NodeTypeSeed:
+	case NodeTypeSeed:
 		return n.runLoopSeed()
-	case model.NodeTypeCache:
+	case NodeTypeCache:
 		return n.runLoopCache()
 	}
 
@@ -225,7 +285,12 @@ func (n *node) Run() error {
 func (n *node) runLoopPeer() error {
 	defer n.leaveSeeds()
 
-	err := n.joinSeeds()
+	err := n.setInitialSeeds()
+	if err != nil {
+		return fmt.Errorf("setting initial seeds: %w", err)
+	}
+
+	err = n.joinSeeds()
 	if err != nil {
 		return fmt.Errorf("joining: %w", err)
 	}
@@ -263,6 +328,11 @@ func (n *node) runLoopPeer() error {
 }
 
 func (n *node) runLoopSeed() error {
+	err := n.setInitialSeeds()
+	if err != nil {
+		return fmt.Errorf("setting initial seeds: %w", err)
+	}
+
 	// t1 := time.NewTicker(5 * time.Second)
 	// defer t1.Stop()
 	t2 := time.NewTicker(time.Minute)
@@ -337,14 +407,47 @@ func (n *node) handleJoin(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	peers, err := n.store.GetRandomPeers(req.RemoteAddr)
+	// add us to the seeds
+	seeds = append(seeds, &model.SeedSpec{
+		CreatedAt:  time.Now().UTC(),
+		RemoteAddr: n.publicAddr,
+		NodeID:     n.nodeID,
+	})
+
+	peers, err := n.store.GetRandomPeers(req.RemoteAddr, MaxPeers)
 	if err != nil {
 		n.logger.Error("fetching peers", "error", err, "remote", req.RemoteAddr)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	err = n.store.UpsertPeer(req.RemoteAddr)
+	nodeID := req.Header.Get(HeaderNodeID)
+
+	body := req.Body
+	defer body.Close()
+	rdr := io.LimitReader(body, bloom.FilterLen)
+	f, err := io.ReadAll(rdr)
+	if err != nil {
+		n.logger.Error("reading body", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	b := bloom.New()
+	err = b.Parse(string(f))
+	if err != nil {
+		n.logger.Error("parsing filter", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = n.store.UpsertPeer(model.PeerSpec{
+		RemoteAddr: req.RemoteAddr,
+		CreatedAt:  time.Now().UTC(),
+		NodeID:     nodeID,
+		Filter:     b.String(),
+	})
+
 	if err != nil {
 		n.logger.Error("upserting peer", "error", err, "remote", req.RemoteAddr)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -352,16 +455,8 @@ func (n *node) handleJoin(w http.ResponseWriter, req *http.Request) {
 	}
 
 	resp := model.JoinResponse{
-		Seeds: make([]string, 0, len(seeds)),
-		Peers: make([]string, 0, len(peers)),
-	}
-
-	for _, s := range seeds {
-		resp.Seeds = append(resp.Seeds, s.RemoteAddr)
-	}
-
-	for _, p := range peers {
-		resp.Peers = append(resp.Peers, p.RemoteAddr)
+		Seeds: seeds,
+		Peers: peers,
 	}
 
 	data, err := json.Marshal(&resp)
@@ -372,7 +467,7 @@ func (n *node) handleJoin(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	w.Header().Add(model.ContentTypeHeader, model.ContentTypeJSON)
+	w.Header().Add(ContentTypeHeader, ContentTypeJSON)
 	w.Header().Add(HeaderRemoteAddress, req.RemoteAddr)
 	w.Write(data)
 
@@ -415,9 +510,7 @@ func (n *node) handleLeave(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (n *node) handleCreateAction(w http.ResponseWriter, req *http.Request) {
-	n.logger.Info("action", "remote", req.RemoteAddr)
-
+func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
 	body := req.Body
 	defer body.Close()
 
@@ -427,59 +520,55 @@ func (n *node) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		n.logger.Error("reading body", "error", err)
 	}
 
-	identity := req.Header.Get(HeaderIdentifier)
-	actionID := req.Header.Get(HeaderActionID)
-	encodedSig := req.Header.Get(HeaderSignature)
-	nodeID := req.Header.Get(HeaderNodeID)
-	action := string(buf)
-
-	sig, err := base64.StdEncoding.DecodeString(encodedSig)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
+	action := Action{
+		ID:               req.Header.Get(HeaderActionID),
+		RemoteAddr:       req.RemoteAddr,
+		NodeID:           req.Header.Get(HeaderNodeID),
+		Identity:         req.Header.Get(HeaderIdentifier),
+		Timestamp:        time.Now().UTC(),
+		Action:           string(buf),
+		ReceivedFrom:     req.Header.Get(HeaderReceivedFrom),
+		EncodedSignature: req.Header.Get(HeaderSignature),
 	}
 
-	// TODO: if certificate is not found, fetch it from the sender
-	cert, err := n.store.GetCachedCertificate(identity)
+	n.logger.Info("action", "data", action)
+
+	isProcessed, err := n.store.IsActionProcessed(action.ID)
 	if err != nil {
-		if !errors.Is(err, model.ErrNotFound) {
-			n.logger.Error("getting certificate", "error", err, "id", identity)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		cert, err = n.fetchIdentity(identity, req.RemoteAddr)
-		if err != nil {
-			n.logger.Error("fetching certificate", "error", err, "id", identity)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-	}
-
-	h := sha256.New()
-	h.Write([]byte(cert.Issuer.CommonName))
-	h.Write([]byte(actionID))
-	h.Write([]byte(action))
-
-	if ed25519PublicKey, ok := cert.PublicKey.(ed25519.PublicKey); ok {
-		if !ed25519.Verify(ed25519PublicKey, h.Sum(nil), sig) {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-	} else {
-		n.logger.Error("unsupported public key type")
+		n.logger.Error("checking action", "error", err, "id", action.ID)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	err = n.store.AddAction(actionID, action, req.RemoteAddr)
-	if err != nil {
-		if errors.Is(err, model.ErrAlreadyExists) {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		n.logger.Error("storing action", "error", err, "identifier", cert.Issuer.CommonName, "id", actionID, "action", action)
+	if isProcessed {
+		w.WriteHeader(http.StatusFound)
+		return
 	}
 
-	parser, err := ast.Parse(action)
+	err = n.verifyAction(action)
+	switch {
+	case err == identity.ErrUnsupportedPublicKey:
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	case err == identity.ErrUnauthorized:
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	case err == identity.ErrBadSignature:
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("bad signature"))
+		return
+	case err != nil:
+		n.logger.Error("verifying action", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	err = n.store.CreateAction(action)
+	if err != nil {
+		n.logger.Error("storing action", "error", err, "action", action)
+	}
+
+	parser, err := ast.Parse(action.Action)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		_, err := w.Write([]byte("syntax error: " + err.Error()))
@@ -489,19 +578,45 @@ func (n *node) handleCreateAction(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	n.actionQueue <- Action{
-		ID:          actionID,
-		Timestamp:   time.Now().UTC(),
-		NodeID:      nodeID,
-		RemoteAddr:  n.remoteAddr,
-		Certificate: *cert,
-		Action:      action,
-		Command:     parser.Command(),
+	action.Command = parser.Command()
+
+	// TODO: for now all command must have an explicit identifier for each node
+	entityIDs := parser.Identifiers()
+	if len(entityIDs) == 0 {
+		n.logger.Warn("no identifiers found")
+		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
-	n.logger.Info("action", "id", actionID, "action", action)
+	err = n.moderateAction(action)
+	if err != nil {
+		if errors.Is(err, model.ErrNotAcceptable) {
+			w.WriteHeader(http.StatusNotAcceptable)
+			return
+		}
+		n.logger.Error("moderating action", "error", err, "action", action)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 
 	w.WriteHeader(http.StatusAccepted)
+	n.logger.Debug("action accepted", "action", action)
+
+	// action is relevant to this node if any of the entity IDs are in the subscription filter
+	isRelevant := false
+	for _, id := range entityIDs {
+		if n.subscriptions.Intersects([]byte(id)) {
+			isRelevant = true
+			break
+		}
+	}
+
+	if isRelevant {
+		n.actionQueue <- action
+	}
+
+	// propagate action to peers
+	go n.propagateAction(action, entityIDs...)
 }
 
 func (n *node) handlePing(w http.ResponseWriter, req *http.Request) {
@@ -510,7 +625,25 @@ func (n *node) handlePing(w http.ResponseWriter, req *http.Request) {
 	w.Header().Add(HeaderRemoteAddress, req.RemoteAddr)
 	w.WriteHeader(http.StatusOK)
 
-	err := n.store.TouchPeer(req.RemoteAddr)
+	body := req.Body
+	defer body.Close()
+	rdr := io.LimitReader(body, bloom.FilterLen)
+	f, err := io.ReadAll(rdr)
+	if err != nil {
+		n.logger.Error("reading body", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	b := bloom.New()
+	err = b.Parse(string(f))
+	if err != nil {
+		n.logger.Error("parsing filter", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = n.store.TouchPeer(req.RemoteAddr, b.String())
 	if err != nil {
 		n.logger.Error("touching peer", "error", err, "remote", req.RemoteAddr)
 	}
@@ -530,6 +663,11 @@ func (n *node) sendPong(addr string) {
 	resp, err := n.client.Do(req)
 	if err != nil {
 		n.logger.Error("sending pong", "error", err, "remote", addr)
+		err = n.store.DeletePeer(addr)
+		if err != nil {
+			n.logger.Error("deleting peer", "error", err, "remote", addr)
+		}
+		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -562,6 +700,7 @@ func (n *node) joinSeeds() error {
 	wg := sync.WaitGroup{}
 	ch := make(chan model.JoinResponse, len(seeds))
 
+	subs := n.subscriptions.String()
 	for _, seed := range seeds {
 		wg.Add(1)
 		go func() {
@@ -573,11 +712,13 @@ func (n *node) joinSeeds() error {
 			defer cancelFnInner()
 
 			url := fmt.Sprintf("https://%s/hello", seed.RemoteAddr)
-			req, err := http.NewRequestWithContext(ctxInner, "POST", url, nil)
+			buf := bytes.NewBufferString(subs)
+			req, err := http.NewRequestWithContext(ctxInner, "POST", url, buf)
 			if err != nil {
 				n.logger.Error("sending hello (constructing request)", "error", err, "remote", seed)
 				return
 			}
+			req.Header.Add(HeaderNodeID, n.nodeID)
 
 			resp, err := n.client.Do(req)
 			if err != nil {
@@ -601,6 +742,8 @@ func (n *node) joinSeeds() error {
 				return
 			}
 
+			n.logger.Debug("join response", "seeds", len(respData.Seeds), "peers", len(respData.Peers))
+
 			err = n.store.TouchSeed(seed.RemoteAddr)
 			if err != nil {
 				n.logger.Error("touching seed", "error", err, "remote", seed.RemoteAddr)
@@ -613,24 +756,24 @@ func (n *node) joinSeeds() error {
 	wg.Wait()
 	close(ch)
 
-	seedMap := map[string]struct{}{}
-	peerMap := map[string]struct{}{}
+	seedMap := map[string]*model.SeedSpec{}
+	peerMap := map[string]*model.PeerSpec{}
 	for resp := range ch {
 		for _, s := range resp.Seeds {
-			if _, ok := seedMap[s]; !ok {
-				seedMap[s] = struct{}{}
+			if _, ok := seedMap[s.RemoteAddr]; !ok {
+				seedMap[s.RemoteAddr] = s
 			}
 		}
 		for _, p := range resp.Peers {
-			if _, ok := peerMap[p]; !ok {
-				peerMap[p] = struct{}{}
+			if _, ok := peerMap[p.RemoteAddr]; !ok {
+				peerMap[p.RemoteAddr] = p
 			}
 		}
 	}
 
-	seedList := []string{}
-	for k := range seedMap {
-		seedList = append(seedList, k)
+	seedList := []*model.SeedSpec{}
+	for _, v := range seedMap {
+		seedList = append(seedList, v)
 	}
 
 	if len(seedList) == 0 {
@@ -642,9 +785,9 @@ func (n *node) joinSeeds() error {
 		return fmt.Errorf("updating seeds: %w", err)
 	}
 
-	peerList := []string{}
-	for k := range peerMap {
-		peerList = append(peerList, k)
+	peerList := []*model.PeerSpec{}
+	for _, v := range peerMap {
+		peerList = append(peerList, v)
 	}
 
 	if len(peerList) == 0 {
@@ -741,7 +884,8 @@ func (n *node) sendPing(remote string) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelFn()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://%s/ping", remote), nil)
+	buf := bytes.NewBufferString(n.subscriptions.String())
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("https://%s/ping", remote), buf)
 	if err != nil {
 		return fmt.Errorf("creating ping: %w", err)
 	}
@@ -787,7 +931,7 @@ func (n *node) generateTLSConfig() *tls.Config {
 	}
 }
 
-func (n *node) SendIdentity(id *identity.Identity) error {
+func (n *node) PublishIdentity(id *identity.Identity) error {
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: id.CertificateData}))
 	certPEMEncoded, err := json.Marshal(certPEM)
 	if err != nil {
@@ -805,7 +949,7 @@ func (n *node) SendIdentity(id *identity.Identity) error {
 	sb.WriteString(strings.Join(props, ", "))
 	sb.WriteString("})")
 
-	err = n.SendAction(id, sb.String())
+	err = n.Publish(id, sb.String())
 	if err != nil {
 		return err
 	}
@@ -813,36 +957,19 @@ func (n *node) SendIdentity(id *identity.Identity) error {
 	return nil
 }
 
-func (n *node) SendAction(id *identity.Identity, action string) error {
-	var privateKey ed25519.PrivateKey
-	for _, key := range id.Keys {
-		if key.Type == identity.KeyTypeED25519PrivateKey {
-			privateKey = key.Data
-			break
-		}
-	}
-	if privateKey == nil {
-		return fmt.Errorf("private key not found")
-	}
-
-	cert, err := x509.ParseCertificate(id.CertificateData)
+func (n *node) Publish(id *identity.Identity, stmt string) error {
+	signer, err := identity.NewSigner(id)
 	if err != nil {
-		return fmt.Errorf("parsing certificate: %w", err)
+		return fmt.Errorf("creating signer: %w", err)
 	}
-	n.store.PutCachedCertificate(cert)
 
-	actionID := gonanoid.Must()
+	actionID := id.Identifier + "." + model.NewID()
 
-	h := sha256.New()
-	h.Write([]byte(id.Identifier))
-	h.Write([]byte(actionID))
-	h.Write([]byte(action))
-	sig := ed25519.Sign(privateKey, h.Sum(nil))
-	encodedSig := base64.StdEncoding.EncodeToString(sig)
+	signer.Add([]byte(actionID))
+	signer.Add([]byte(stmt))
+	encodedSig := signer.Sign()
 
-	buf := bytes.NewBufferString(action)
-
-	ctx, cancelFn := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
 	peers, err := n.store.GetAllPeers()
@@ -854,51 +981,84 @@ func (n *node) SendAction(id *identity.Identity, action string) error {
 		return fmt.Errorf("no peers available")
 	}
 
-	err = n.store.AddAction(actionID, action, SelfRemoteAddress)
+	action := Action{
+		ID:               actionID,
+		RemoteAddr:       n.publicAddr,
+		NodeID:           n.nodeID,
+		Identity:         id.Identifier,
+		Timestamp:        time.Now().UTC(),
+		Action:           stmt,
+		ReceivedFrom:     id.Identifier+"="+encodedSig,
+		EncodedSignature: encodedSig,
+	}
+
+	err = n.store.CreateAction(action)
 	if err != nil {
 		return fmt.Errorf("send action: saving action: %w", err)
 	}
 
 	wg := sync.WaitGroup{}
 	for _, peer := range peers {
-		if peer.RemoteAddr == n.remoteAddr {
-			continue
-		}
-
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ctxInner, cancelFnInner := context.WithTimeout(ctx, 5*time.Second)
-			defer cancelFnInner()
-
-			url := fmt.Sprintf("https://%s/action", peer.RemoteAddr)
-			req, err := http.NewRequestWithContext(ctxInner, "POST", url, buf)
-			req.Header.Add(HeaderIdentifier, id.Identifier)
-			req.Header.Add(HeaderActionID, actionID)
-			req.Header.Add(HeaderNodeID, n.nodeID)
-			req.Header.Add(HeaderSignature, encodedSig)
-
-			if err != nil {
-				n.logger.Error("send action: creating action request", "error", err, "remote", peer.RemoteAddr)
-				return
-			}
-
-			resp, err := n.client.Do(req)
-			if err != nil {
-				n.logger.Error("send action: executing action request", "error", err, "remote", peer.RemoteAddr)
-				return
-			}
-
-			if resp.StatusCode != http.StatusAccepted {
-				n.logger.Error("send action: action request not accepted", "error", err, "remote", peer.RemoteAddr)
-				return
-			}
-
-			err = n.store.TouchPeer(peer.RemoteAddr)
-			n.logger.Error("send action: touching peer", "error", err, "remote", peer.RemoteAddr)
+			n.dispatchAction(ctx, peer, action)
 		}()
 	}
 	wg.Wait()
+
+	return nil
+}
+
+func (n *node) dispatchAction(ctx context.Context, peer *model.PeerSpec, action Action) error {
+	ctxInner, cancelFnInner := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelFnInner()
+
+	buf := bytes.NewBufferString(action.Action)
+
+	url := fmt.Sprintf("https://%s/publish", peer.RemoteAddr)
+	req, err := http.NewRequestWithContext(ctxInner, "POST", url, buf)
+	req.Header.Add(HeaderIdentifier, action.Identity)
+	req.Header.Add(HeaderActionID, action.ID)
+	req.Header.Add(HeaderNodeID, action.NodeID)
+	req.Header.Add(HeaderSignature, action.EncodedSignature)
+
+	if len(action.ReceivedFrom) > 0 {
+
+
+		signer with n.identity
+
+
+		sb := strings.Builder{}
+		sb.WriteString(action.ReceivedFrom)
+		sb.WriteString(";")
+		sb.WriteString(n.nodeID)
+		sb.WriteString("=")
+		sig, err := n.identity.Sign(sb.String())
+		if err != nil {
+			return fmt.Errorf("send action: signing received from: %w", err)
+		}
+		sb.WriteString(sig)
+		req.Header.Add(HeaderReceivedFrom, sb.String())
+	}
+
+	if err != nil {
+		return fmt.Errorf("send action: creating action request: %w", err)
+	}
+
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send action: executing action request: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("send action: action request not accepted: %d", resp.StatusCode)
+	}
+
+	err = n.store.TouchPeer(peer.RemoteAddr, "")
+	if err != nil {
+		return fmt.Errorf("send action: touching peer: %w", err)
+	}
 
 	return nil
 }
@@ -922,7 +1082,28 @@ func (n *node) handleWhoIs(w http.ResponseWriter, req *http.Request) {
 	}
 
 	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
-	w.Header().Add(model.ContentTypeHeader, "text/plain")
+	w.Header().Add(ContentTypeHeader, "text/plain")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
+func (n *node) handleWhoAmI(w http.ResponseWriter, req *http.Request) {
+	n.logger.Info("whomai", "remote", req.RemoteAddr)
+	spec := model.PeerSpec{
+		CreatedAt:  time.Now().UTC(),
+		RemoteAddr: n.publicAddr,
+		NodeID:     n.nodeID,
+	}
+
+	data, err := json.Marshal(&spec)
+	if err != nil {
+		n.logger.Error("marshalling whoami", "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Add(ContentTypeHeader, ContentTypeJSON)
+	w.Header().Add(HeaderRemoteAddress, req.RemoteAddr)
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
 }
@@ -980,4 +1161,74 @@ func (n *node) tidyPeers() error {
 
 func (n *node) CountOfPeers() (int, error) {
 	return n.store.CountOfPeers()
+}
+
+func (n *node) propagateAction(action Action, entityIDs ...string) error {
+	peers, err := n.store.GetAllPeers()
+	if err != nil {
+		return fmt.Errorf("dispatch getting peers: %w", err)
+	}
+
+	wg := sync.WaitGroup{}
+	for _, p := range peers {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			b := bloom.New()
+			err = b.Parse(p.Filter)
+			if err != nil {
+				n.logger.Error("dispatch parsing filter", "error", err)
+				return
+			}
+
+			isWatching := false
+			for _, id := range entityIDs {
+				if b.Intersects([]byte(id)) {
+					isWatching = true
+					break
+				}
+			}
+
+			if !isWatching {
+				return
+			}
+
+			ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
+			defer cancelFn()
+			n.dispatchAction(ctx, p, action)
+		}()
+	}
+	wg.Wait()
+
+	return nil
+}
+
+func (n *node) verifyAction(action Action) error {
+	cert, err := n.store.GetCachedCertificate(action.Identity)
+	if err != nil {
+		if !errors.Is(err, model.ErrNotFound) {
+			return fmt.Errorf("getting certificate: %w", err)
+		}
+		cert, err = n.fetchIdentity(action.Identity, action.RemoteAddr)
+		if err != nil {
+			return fmt.Errorf("fetching certificate: %w", err)
+		}
+	}
+
+	v, err := identity.NewVerifier(cert)
+	v.Add([]byte(action.ID))
+	v.Add([]byte(action.Action))
+	err = v.Verify(action.EncodedSignature)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (n *node) moderateAction(action Action) error {
+	//TODO: implement moderation
+	return nil
 }

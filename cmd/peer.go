@@ -18,12 +18,15 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 
-	"github.com/jdudmesh/propolis/internal/model"
+	"github.com/jdudmesh/propolis/internal/bloom"
+	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 var peerCmd = &cobra.Command{
@@ -66,32 +69,23 @@ var peerCmd = &cobra.Command{
 			return fmt.Errorf("no seeds specified: %w", err)
 		}
 
-		subs, err := cmd.Flags().GetStringArray("sub")
-		if err != nil {
-			return fmt.Errorf("no initial subscritions: %w", err)
+		config := node.Config{
+			Config: graph.Config{
+				Logger:           logger,
+				GraphDatabaseURL: graphDatabaseURL,
+			},
+			Type:            node.NodeTypePeer,
+			Host:            host,
+			Port:            port,
+			NodeDatabaseURL: nodeDatabaseURL,
+			Seeds:           seeds,
 		}
 
-		config := model.NodeConfig{
-			Type:             model.NodeTypePeer,
-			Host:             host,
-			Port:             port,
-			Logger:           logger,
-			NodeDatabaseURL:  nodeDatabaseURL,
-			GraphDatabaseURL: graphDatabaseURL,
-		}
-		h, err := node.New(config)
+		filter := bloom.New()
+
+		h, err := node.New(config, filter)
 		if err != nil {
 			return fmt.Errorf("creating peer: %w", err)
-		}
-
-		err = h.SetInitialSeeds(seeds)
-		if err != nil {
-			return fmt.Errorf("setting initial seeds: %w", err)
-		}
-
-		err = h.SetInitialSubscriptions(subs)
-		if err != nil {
-			return fmt.Errorf("setting initial subs: %w", err)
 		}
 
 		wg := sync.WaitGroup{}
@@ -104,6 +98,15 @@ var peerCmd = &cobra.Command{
 			}
 		}()
 
+		sigint := make(chan os.Signal, 1)
+		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		s := <-sigint
+		logger.Info("stopping server", "signal", s)
+		err = h.Close()
+		if err != nil {
+			logger.Error("shutting down main server", "error", err)
+		}
+
 		wg.Wait()
 
 		return err
@@ -111,8 +114,5 @@ var peerCmd = &cobra.Command{
 }
 
 func init() {
-	peerCmd.Flags().StringArray("sub", []string{}, "initial subscription")
-	viper.BindPFlag("sub", peerCmd.Flags().Lookup("sub"))
-
 	baseCmd.AddCommand(peerCmd)
 }

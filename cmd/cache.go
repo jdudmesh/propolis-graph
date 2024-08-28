@@ -20,7 +20,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/jdudmesh/propolis/internal/model"
+	"github.com/jdudmesh/propolis/internal/bloom"
+	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/node"
 	"github.com/spf13/cobra"
 )
@@ -55,22 +56,22 @@ var cacheCmd = &cobra.Command{
 			return fmt.Errorf("no seeds specified: %w", err)
 		}
 
-		config := model.NodeConfig{
-			Type:             model.NodeTypeCache,
-			Host:             host,
-			Port:             port,
-			Logger:           logger,
-			NodeDatabaseURL:  nodeDatabaseURL,
-			GraphDatabaseURL: graphDatabaseURL,
-		}
-		h, err := node.New(config)
-		if err != nil {
-			return fmt.Errorf("creating peer: %w", err)
+		config := node.Config{
+			Config: graph.Config{
+				Logger:           logger,
+				GraphDatabaseURL: graphDatabaseURL,
+			},
+			Type:            node.NodeTypeCache,
+			Host:            host,
+			Port:            port,
+			NodeDatabaseURL: nodeDatabaseURL,
+			Seeds:           seeds,
 		}
 
-		err = h.SetInitialSeeds(seeds)
+		filter := bloom.New()
+		h, err := node.New(config, filter)
 		if err != nil {
-			return fmt.Errorf("setting initial seeds: %w", err)
+			return fmt.Errorf("creating peer: %w", err)
 		}
 
 		wg := sync.WaitGroup{}

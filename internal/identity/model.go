@@ -33,3 +33,7 @@ type KeyItem struct {
 	Type      KeyType    `db:"key_type"`
 	Data      []byte     `db:"data"`
 }
+
+func (i Identity) Sign(string) (string, error) {
+	return "", nil
+}
