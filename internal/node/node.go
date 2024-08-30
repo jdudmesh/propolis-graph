@@ -46,38 +46,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-const (
-	MaxBodySize = 1048576
-
-	HeaderRemoteAddress = "x-propolis-remote-address"
-	HeaderActionID      = "x-propolis-action-id"
-	HeaderNodeID        = "x-propolis-node-id"
-	HeaderSender        = "x-propolis-sender"
-	HeaderSignature     = "x-propolis-signature"
-	HeaderIdentifier    = "x-propolis-identifier"
-	HeaderReceivedFrom  = "x-propolis-received-from"
-
-	SelfRemoteAddress = "0.0.0.0"
-	MaxPeers          = 5
-)
-
-type Graph interface {
-	Execute(stmt any) (any, error)
-}
-
-type Action struct {
-	ID               string
-	RemoteAddr       string
-	NodeID           string
-	Identity         string
-	Timestamp        time.Time
-	Action           string
-	Command          ast.Command
-	Certificate      x509.Certificate
-	ReceivedFrom     string
-	EncodedSignature string
-}
-
 type node struct {
 	nodeID             string
 	host               string
@@ -88,7 +56,7 @@ type node struct {
 	server             *http3.Server
 	client             *http.Client
 	notifyPendingPeers chan string
-	actionQueue        chan Action
+	actionQueue        chan graph.Action
 	quit               chan struct{}
 	publicAddr         string
 	nodeType           NodeType
@@ -128,7 +96,7 @@ func New(config Config, subscriptions *bloom.Filter) (*node, error) {
 		nodeType:           config.Type,
 		executor:           executor,
 		notifyPendingPeers: make(chan string),
-		actionQueue:        make(chan Action),
+		actionQueue:        make(chan graph.Action),
 		quit:               make(chan struct{}),
 		subscriptions:      subscriptions,
 		seeds:              config.Seeds,
@@ -211,7 +179,7 @@ func (n *node) newServeMux() *http.ServeMux {
 		mux.HandleFunc("POST /ping", n.handlePing)
 		mux.HandleFunc("POST /pong", n.handlePong)
 		mux.HandleFunc("GET /whois/{id}", n.handleWhoIs)
-		mux.HandleFunc("POST /publish", n.handlePublish)
+		mux.HandleFunc("POST /exec", n.handleExecute)
 	}
 	return mux
 }
@@ -321,10 +289,42 @@ func (n *node) runLoopPeer() error {
 				}
 			}()
 			n.roundTripper.CloseIdleConnections()
+		case action := <-n.actionQueue:
+			n.processAction(action)
+
 		case <-n.quit:
 			return nil
 		}
 	}
+}
+
+func (n *node) processAction(action graph.Action) {
+	res, err := n.executor.Execute(action)
+	if err != nil {
+		n.logger.Error("executing action", "error", err)
+	}
+	n.logger.Debug("action executed", "result", res)
+	// propagate action to peers
+	// for _, entityID := range res.EntityIDs {
+	// 	go n.propagateAction(action, entityIDs...)
+	// }
+
+	// // action is relevant to this node if any of the entity IDs are in the subscription filter
+	// // TODO: for now all command must have an explicit identifier for each node
+	// entityIDs := parser.Identifiers()
+	// if len(entityIDs) == 0 {
+	// 	n.logger.Warn("no identifiers found")
+	// 	w.WriteHeader(http.StatusBadRequest)
+	// 	return
+	// }
+	// isRelevant := false
+	// for _, id := range entityIDs {
+	// 	if n.subscriptions.Intersects([]byte(id)) {
+	// 		isRelevant = true
+	// 		break
+	// 	}
+	// }
+
 }
 
 func (n *node) runLoopSeed() error {
@@ -376,7 +376,7 @@ outer:
 		select {
 		case action := <-n.actionQueue:
 
-			res, err := n.executor.Execute(action.Command)
+			res, err := n.executor.Execute(action)
 			if err != nil {
 				n.logger.Error("executing action", "error", err)
 				continue
@@ -467,7 +467,7 @@ func (n *node) handleJoin(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	w.Header().Add(ContentTypeHeader, ContentTypeJSON)
+	w.Header().Add(HeaderContentType, ContentTypeJSON)
 	w.Header().Add(HeaderRemoteAddress, req.RemoteAddr)
 	w.Write(data)
 
@@ -510,7 +510,7 @@ func (n *node) handleLeave(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
+func (n *node) handleExecute(w http.ResponseWriter, req *http.Request) {
 	body := req.Body
 	defer body.Close()
 
@@ -520,14 +520,14 @@ func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
 		n.logger.Error("reading body", "error", err)
 	}
 
-	action := Action{
+	action := graph.Action{
 		ID:               req.Header.Get(HeaderActionID),
 		RemoteAddr:       req.RemoteAddr,
 		NodeID:           req.Header.Get(HeaderNodeID),
 		Identity:         req.Header.Get(HeaderIdentifier),
 		Timestamp:        time.Now().UTC(),
 		Action:           string(buf),
-		ReceivedFrom:     req.Header.Get(HeaderReceivedFrom),
+		ReceivedBy:       req.Header.Get(HeaderReceivedBy),
 		EncodedSignature: req.Header.Get(HeaderSignature),
 	}
 
@@ -545,7 +545,7 @@ func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	err = n.verifyAction(action)
+	err = n.verifyAction(&action)
 	switch {
 	case err == identity.ErrUnsupportedPublicKey:
 		w.WriteHeader(http.StatusInternalServerError)
@@ -562,6 +562,17 @@ func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
+	sb := strings.Builder{}
+	if action.ReceivedBy != "" {
+		sb.WriteString(action.ReceivedBy)
+		sb.WriteRune(';')
+	}
+	sb.WriteString(fmt.Sprintf("by=%s,from=%s,on=%s",
+		n.nodeID,
+		action.RemoteAddr,
+		action.Timestamp.Format(time.RFC3339)))
+	action.ReceivedBy = sb.String()
 
 	err = n.store.CreateAction(action)
 	if err != nil {
@@ -580,15 +591,7 @@ func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
 
 	action.Command = parser.Command()
 
-	// TODO: for now all command must have an explicit identifier for each node
-	entityIDs := parser.Identifiers()
-	if len(entityIDs) == 0 {
-		n.logger.Warn("no identifiers found")
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	err = n.moderateAction(action)
+	err = n.moderateAction(&action)
 	if err != nil {
 		if errors.Is(err, model.ErrNotAcceptable) {
 			w.WriteHeader(http.StatusNotAcceptable)
@@ -602,21 +605,7 @@ func (n *node) handlePublish(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	n.logger.Debug("action accepted", "action", action)
 
-	// action is relevant to this node if any of the entity IDs are in the subscription filter
-	isRelevant := false
-	for _, id := range entityIDs {
-		if n.subscriptions.Intersects([]byte(id)) {
-			isRelevant = true
-			break
-		}
-	}
-
-	if isRelevant {
-		n.actionQueue <- action
-	}
-
-	// propagate action to peers
-	go n.propagateAction(action, entityIDs...)
+	n.actionQueue <- action
 }
 
 func (n *node) handlePing(w http.ResponseWriter, req *http.Request) {
@@ -949,7 +938,7 @@ func (n *node) PublishIdentity(id *identity.Identity) error {
 	sb.WriteString(strings.Join(props, ", "))
 	sb.WriteString("})")
 
-	err = n.Publish(id, sb.String())
+	err = n.Execute(id, sb.String())
 	if err != nil {
 		return err
 	}
@@ -957,7 +946,7 @@ func (n *node) PublishIdentity(id *identity.Identity) error {
 	return nil
 }
 
-func (n *node) Publish(id *identity.Identity, stmt string) error {
+func (n *node) Execute(id *identity.Identity, stmt string) error {
 	signer, err := identity.NewSigner(id)
 	if err != nil {
 		return fmt.Errorf("creating signer: %w", err)
@@ -969,6 +958,29 @@ func (n *node) Publish(id *identity.Identity, stmt string) error {
 	signer.Add([]byte(stmt))
 	encodedSig := signer.Sign()
 
+	now := time.Now().UTC()
+	recvBy := fmt.Sprintf("by=%s,from=,on=%s",
+		n.nodeID,
+		now.Format(time.RFC3339))
+
+	action := graph.Action{
+		ID:               actionID,
+		RemoteAddr:       n.publicAddr,
+		NodeID:           n.nodeID,
+		Certificate:      id.Certificate,
+		Timestamp:        now,
+		Action:           stmt,
+		ReceivedBy:       recvBy,
+		EncodedSignature: encodedSig,
+	}
+
+	err = n.store.CreateAction(action)
+	if err != nil {
+		return fmt.Errorf("send action: saving action: %w", err)
+	}
+
+	n.actionQueue <- action
+
 	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
@@ -978,23 +990,7 @@ func (n *node) Publish(id *identity.Identity, stmt string) error {
 	}
 
 	if len(peers) == 0 {
-		return fmt.Errorf("no peers available")
-	}
-
-	action := Action{
-		ID:               actionID,
-		RemoteAddr:       n.publicAddr,
-		NodeID:           n.nodeID,
-		Identity:         id.Identifier,
-		Timestamp:        time.Now().UTC(),
-		Action:           stmt,
-		ReceivedFrom:     id.Identifier+"="+encodedSig,
-		EncodedSignature: encodedSig,
-	}
-
-	err = n.store.CreateAction(action)
-	if err != nil {
-		return fmt.Errorf("send action: saving action: %w", err)
+		n.logger.Warn("no peers found")
 	}
 
 	wg := sync.WaitGroup{}
@@ -1010,7 +1006,7 @@ func (n *node) Publish(id *identity.Identity, stmt string) error {
 	return nil
 }
 
-func (n *node) dispatchAction(ctx context.Context, peer *model.PeerSpec, action Action) error {
+func (n *node) dispatchAction(ctx context.Context, peer *model.PeerSpec, action graph.Action) error {
 	ctxInner, cancelFnInner := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelFnInner()
 
@@ -1018,28 +1014,12 @@ func (n *node) dispatchAction(ctx context.Context, peer *model.PeerSpec, action 
 
 	url := fmt.Sprintf("https://%s/publish", peer.RemoteAddr)
 	req, err := http.NewRequestWithContext(ctxInner, "POST", url, buf)
-	req.Header.Add(HeaderIdentifier, action.Identity)
+	req.Header.Add(HeaderIdentifier, action.Certificate.Issuer.CommonName)
 	req.Header.Add(HeaderActionID, action.ID)
 	req.Header.Add(HeaderNodeID, action.NodeID)
 	req.Header.Add(HeaderSignature, action.EncodedSignature)
-
-	if len(action.ReceivedFrom) > 0 {
-
-
-		signer with n.identity
-
-
-		sb := strings.Builder{}
-		sb.WriteString(action.ReceivedFrom)
-		sb.WriteString(";")
-		sb.WriteString(n.nodeID)
-		sb.WriteString("=")
-		sig, err := n.identity.Sign(sb.String())
-		if err != nil {
-			return fmt.Errorf("send action: signing received from: %w", err)
-		}
-		sb.WriteString(sig)
-		req.Header.Add(HeaderReceivedFrom, sb.String())
+	if len(action.ReceivedBy) > 0 {
+		req.Header.Add(HeaderReceivedBy, action.ReceivedBy)
 	}
 
 	if err != nil {
@@ -1082,7 +1062,7 @@ func (n *node) handleWhoIs(w http.ResponseWriter, req *http.Request) {
 	}
 
 	data := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
-	w.Header().Add(ContentTypeHeader, "text/plain")
+	w.Header().Add(HeaderContentType, "text/plain")
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
 }
@@ -1102,7 +1082,7 @@ func (n *node) handleWhoAmI(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	w.Header().Add(ContentTypeHeader, ContentTypeJSON)
+	w.Header().Add(HeaderContentType, ContentTypeJSON)
 	w.Header().Add(HeaderRemoteAddress, req.RemoteAddr)
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
@@ -1163,7 +1143,7 @@ func (n *node) CountOfPeers() (int, error) {
 	return n.store.CountOfPeers()
 }
 
-func (n *node) propagateAction(action Action, entityIDs ...string) error {
+func (n *node) propagateAction(action graph.Action, entityIDs ...string) error {
 	peers, err := n.store.GetAllPeers()
 	if err != nil {
 		return fmt.Errorf("dispatch getting peers: %w", err)
@@ -1205,7 +1185,7 @@ func (n *node) propagateAction(action Action, entityIDs ...string) error {
 	return nil
 }
 
-func (n *node) verifyAction(action Action) error {
+func (n *node) verifyAction(action *graph.Action) error {
 	cert, err := n.store.GetCachedCertificate(action.Identity)
 	if err != nil {
 		if !errors.Is(err, model.ErrNotFound) {
@@ -1225,10 +1205,12 @@ func (n *node) verifyAction(action Action) error {
 		return err
 	}
 
+	action.Certificate = cert
+
 	return nil
 }
 
-func (n *node) moderateAction(action Action) error {
+func (n *node) moderateAction(action *graph.Action) error {
 	//TODO: implement moderation
 	return nil
 }

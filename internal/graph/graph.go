@@ -32,7 +32,8 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("not found")
+	ErrNotFound     = errors.New("not found")
+	ErrUnauthorized = errors.New("unauthorized")
 )
 
 type Config struct {
@@ -57,8 +58,8 @@ func New(config Config) (*executor, error) {
 	}, nil
 }
 
-func (e *executor) Execute(stmt any) (any, error) {
-	ctx, cancelFn := context.WithTimeout(context.Background(), 86400*time.Second)
+func (e *executor) Execute(action Action) (any, error) {
+	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancelFn()
 
 	tx, err := e.store.CreateTx(ctx)
@@ -67,17 +68,13 @@ func (e *executor) Execute(stmt any) (any, error) {
 	}
 
 	var res any
-	if cmd, ok := stmt.(ast.Command); ok {
-		switch cmd.Type() {
-		case ast.EntityTypeMergeCmd:
-			res, err = e.finaliseMergeCmd(cmd, tx)
-		case ast.EntityTypeMatchCmd:
-			res, err = e.finaliseMatchCmd(cmd, tx)
-		default:
-			return nil, fmt.Errorf("unknown command: %v", cmd)
-		}
-	} else {
-		return nil, fmt.Errorf("unexpected entity: %v", stmt)
+	switch action.Command.Type() {
+	case ast.EntityTypeMergeCmd:
+		res, err = e.finaliseMergeCmd(action.Command, action.Identity, action.ID, tx)
+	case ast.EntityTypeMatchCmd:
+		res, err = e.finaliseMatchCmd(action.Command, action.Identity, tx)
+	default:
+		return nil, fmt.Errorf("unknown command: %v", action.Command)
 	}
 
 	if err != nil {
@@ -93,7 +90,7 @@ func (e *executor) Execute(stmt any) (any, error) {
 	return res, nil
 }
 
-func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
+func (e *executor) finaliseNode(n ast.Entity, ownerID, actionID string, tx *sqlx.Tx) (*Node, error) {
 	now := time.Now().UTC()
 
 	node, err := e.findNode(n, tx)
@@ -107,26 +104,32 @@ func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 		node = &Node{
 			ID:        model.NewID(),
 			CreatedAt: now,
+			OwnerID:   ownerID,
 		}
 	} else {
+		if node.OwnerID != ownerID {
+			return nil, ErrUnauthorized
+		}
 		node.UpdatedAt = &now
 	}
 
+	node.LastActionID = actionID
+
 	_, err = tx.NamedExec(`
-		insert into nodes(id, created_at)
-		values(:id, :created_at)
+		insert into nodes(id, created_at, owner_id, last_action_id)
+		values(:id, :created_at, :owner_id, :last_action_id)
 		on conflict(id) do update
-		set updated_at = :updated_at`, node)
+		set updated_at = :updated_at, last_action_id = :last_action_id`, node)
 	if err != nil {
 		return nil, fmt.Errorf("upserting node: %w", err)
 	}
 
-	node.labels, err = e.finaliseNodeLabels(node.ID, n, tx)
+	node.labels, err = e.finaliseNodeLabels(node.ID, n, ownerID, actionID, tx)
 	if err != nil {
 		return nil, fmt.Errorf("finalising labels: %w", err)
 	}
 
-	node.attributes, err = e.finaliseNodeAttributes(node.ID, n, tx)
+	node.attributes, err = e.finaliseNodeAttributes(node.ID, n, ownerID, actionID, tx)
 	if err != nil {
 		return nil, fmt.Errorf("finalising attrs: %w", err)
 	}
@@ -134,7 +137,7 @@ func (e *executor) finaliseNode(n ast.Entity, tx *sqlx.Tx) (*Node, error) {
 	return node, nil
 }
 
-func (e *executor) finaliseNodeLabels(nodeID string, n ast.Entity, tx *sqlx.Tx) ([]*NodeLabel, error) {
+func (e *executor) finaliseNodeLabels(nodeID string, n ast.Entity, ownerID, actionID string, tx *sqlx.Tx) ([]*NodeLabel, error) {
 	now := time.Now().UTC()
 	labels := []*NodeLabel{}
 
@@ -166,10 +169,13 @@ func (e *executor) finaliseNodeLabels(nodeID string, n ast.Entity, tx *sqlx.Tx) 
 			label.UpdatedAt = &now
 		}
 
+		label.LastActionID = actionID
+
 		_, err = tx.NamedExec(`
-			insert into node_labels(id, created_at, node_id, label)
-			values(:id, :created_at, :node_id, :label)
-			on conflict(id) do update set updated_at = :updated_at`, label)
+			insert into node_labels(id, created_at, last_action_id, node_id, label)
+			values(:id, :created_at, :last_action_id, :node_id, :label)
+			on conflict(id) do update
+			set updated_at = :updated_at, last_action_id = :last_action_id`, label)
 		if err != nil {
 			return nil, fmt.Errorf("inserting label: %w", err)
 		}
@@ -194,7 +200,7 @@ func (e *executor) finaliseNodeLabels(nodeID string, n ast.Entity, tx *sqlx.Tx) 
 	return labels2, nil
 }
 
-func (e *executor) finaliseNodeAttributes(nodeID string, n ast.Entity, tx *sqlx.Tx) ([]*NodeAttribute, error) {
+func (e *executor) finaliseNodeAttributes(nodeID string, n ast.Entity, ownerID, actionID string, tx *sqlx.Tx) ([]*NodeAttribute, error) {
 	now := time.Now().UTC()
 	attrs := []*NodeAttribute{}
 
@@ -225,11 +231,15 @@ func (e *executor) finaliseNodeAttributes(nodeID string, n ast.Entity, tx *sqlx.
 		} else {
 			attr.UpdatedAt = &now
 		}
+
+		attr.LastActionID = actionID
+
 		attr.Value = a.Value()
 		_, err = tx.NamedExec(`
-			insert into node_attributes(id, created_at, node_id, attr_name, attr_value, data_type)
-			values(:id, :created_at, :node_id, :attr_name, :attr_value, :data_type)
-			on conflict(id) do update set updated_at = :updated_at, attr_value = :attr_value`, &attr)
+			insert into node_attributes(id, created_at, last_action_id, node_id, attr_name, attr_value, data_type)
+			values(:id, :created_at, :last_action_id, :node_id, :attr_name, :attr_value, :data_type)
+			on conflict(id) do update
+			set updated_at = :updated_at, last_action_id = :last_action_id, attr_value = :attr_value`, &attr)
 		if err != nil {
 			return nil, fmt.Errorf("inserting attr: %w", err)
 		}
@@ -254,15 +264,15 @@ func (e *executor) finaliseNodeAttributes(nodeID string, n ast.Entity, tx *sqlx.
 	return attrs2, nil
 }
 
-func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, error) {
+func (e *executor) finaliseRelation(r ast.Relation, ownerID, actionID string, tx *sqlx.Tx) (*Relation, error) {
 	now := time.Now().UTC()
 
-	left, err := e.finaliseNode(r.Left(), tx)
+	left, err := e.finaliseNode(r.Left(), ownerID, actionID, tx)
 	if err != nil {
 		return nil, fmt.Errorf("finalising left node: %w", err)
 	}
 
-	right, err := e.finaliseNode(r.Right(), tx)
+	right, err := e.finaliseNode(r.Right(), ownerID, actionID, tx)
 	if err != nil {
 		return nil, fmt.Errorf("finalising right node: %w", err)
 	}
@@ -278,11 +288,16 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, err
 		rel = &Relation{
 			ID:        model.NewID(),
 			CreatedAt: now,
+			OwnerID:   ownerID,
 		}
 	} else {
+		if rel.OwnerID != ownerID {
+			return nil, ErrUnauthorized
+		}
 		rel.UpdatedAt = &now
 	}
 
+	rel.LastActionID = actionID
 	rel.Direction = r.Direction()
 	rel.LeftNodeID = left.ID
 	rel.RightNodeID = right.ID
@@ -290,23 +305,25 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, err
 	rel.rightNode = right
 
 	_, err = tx.NamedExec(`
-		insert into relations(id, created_at, left_node_id, right_node_id, direction)
-		values(:id, :created_at, :left_node_id, :right_node_id, :direction)
+		insert into relations(id, created_at, owner_id, last_action_id, left_node_id, right_node_id, direction)
+		values(:id, :created_at, :owner_id, :last_action_id, :left_node_id, :right_node_id, :direction)
 		on conflict(id) do update set
 		updated_at = :updated_at,
+		last_action_id = :last_action_id,
 		left_node_id = :left_node_id,
 		right_node_id = :right_node_id,
 		direction = :direction`, rel)
+
 	if err != nil {
 		return nil, fmt.Errorf("upserting relation: %w", err)
 	}
 
-	rel.labels, err = e.finaliseRelationLabels(rel.ID, r, tx)
+	rel.labels, err = e.finaliseRelationLabels(rel.ID, r, ownerID, actionID, tx)
 	if err != nil {
 		return nil, fmt.Errorf("finalising labels: %w", err)
 	}
 
-	rel.attributes, err = e.finaliseRelationAttributes(rel.ID, r, tx)
+	rel.attributes, err = e.finaliseRelationAttributes(rel.ID, r, ownerID, actionID, tx)
 	if err != nil {
 		return nil, fmt.Errorf("finalising attrs: %w", err)
 	}
@@ -314,7 +331,7 @@ func (e *executor) finaliseRelation(r ast.Relation, tx *sqlx.Tx) (*Relation, err
 	return rel, nil
 }
 
-func (e *executor) finaliseRelationLabels(relationID string, r ast.Relation, tx *sqlx.Tx) ([]*RelationLabel, error) {
+func (e *executor) finaliseRelationLabels(relationID string, r ast.Relation, ownerID, actionID string, tx *sqlx.Tx) ([]*RelationLabel, error) {
 	now := time.Now().UTC()
 	labels := []*RelationLabel{}
 
@@ -346,10 +363,13 @@ func (e *executor) finaliseRelationLabels(relationID string, r ast.Relation, tx 
 			label.UpdatedAt = &now
 		}
 
+		label.LastActionID = actionID
+
 		_, err = tx.NamedExec(`
-			insert into relation_labels(id, created_at, relation_id, label)
-			values(:id, :created_at, :relation_id, :label)
-			on conflict(id) do update set updated_at = :updated_at`, label)
+			insert into relation_labels(id, created_at, last_action_id, relation_id, label)
+			values(:id, :created_at, :last_action_id, :relation_id, :label)
+			on conflict(id) do update
+			set updated_at = :updated_at, last_action_id = :last_action_id`, label)
 		if err != nil {
 			return nil, fmt.Errorf("inserting label: %w", err)
 		}
@@ -374,7 +394,7 @@ func (e *executor) finaliseRelationLabels(relationID string, r ast.Relation, tx 
 	return labels2, nil
 }
 
-func (e *executor) finaliseRelationAttributes(relationID string, r ast.Relation, tx *sqlx.Tx) ([]*RelationAttribute, error) {
+func (e *executor) finaliseRelationAttributes(relationID string, r ast.Relation, ownerID, actionID string, tx *sqlx.Tx) ([]*RelationAttribute, error) {
 	now := time.Now().UTC()
 	attrs := []*RelationAttribute{}
 
@@ -405,11 +425,15 @@ func (e *executor) finaliseRelationAttributes(relationID string, r ast.Relation,
 		} else {
 			attr.UpdatedAt = &now
 		}
+
+		attr.LastActionID = actionID
 		attr.Value = a.Value()
+
 		_, err = tx.NamedExec(`
-			insert into relation_attributes(id, created_at, relation_id, attr_name, attr_value, data_type)
-			values(:id, :created_at, :relation_id, :attr_name, :attr_value, :data_type)
-			on conflict(id) do update set updated_at = :updated_at, attr_value = :attr_value`, &attr)
+			insert into relation_attributes(id, created_at, last_action_id, relation_id, attr_name, attr_value, data_type)
+			values(:id, :created_at, :last_action_id, :relation_id, :attr_name, :attr_value, :data_type)
+			on conflict(id) do update
+			set updated_at = :updated_at, last_action_id = :last_action_id, attr_value = :attr_value`, &attr)
 		if err != nil {
 			return nil, fmt.Errorf("inserting attr: %w", err)
 		}
@@ -434,18 +458,19 @@ func (e *executor) finaliseRelationAttributes(relationID string, r ast.Relation,
 	return attrs2, nil
 }
 
-func (e *executor) finaliseMergeCmd(cmd ast.Command, tx *sqlx.Tx) (any, error) {
+func (e *executor) finaliseMergeCmd(cmd ast.Command, ownerID, actionID string, tx *sqlx.Tx) (any, error) {
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
-		return e.finaliseNode(cmd.Entity(), tx)
+		return e.finaliseNode(cmd.Entity(), ownerID, actionID, tx)
 	case ast.EntityTypeRelation:
-		return e.finaliseRelation(cmd.Entity().(ast.Relation), tx)
+		return e.finaliseRelation(cmd.Entity().(ast.Relation), ownerID, actionID, tx)
 	default:
 		return nil, fmt.Errorf("unexpected entity: %v", cmd.Entity())
 	}
 }
 
-func (e *executor) finaliseMatchCmd(cmd ast.Command, tx *sqlx.Tx) (*SearchResults, error) {
+func (e *executor) finaliseMatchCmd(cmd ast.Command, identity string, tx *sqlx.Tx) (*SearchResults, error) {
+	// TODO check identity has permission to match
 	switch cmd.Entity().Type() {
 	case ast.EntityTypeNode:
 		return e.searchNodes(cmd.Entity(), cmd.Since(), tx)

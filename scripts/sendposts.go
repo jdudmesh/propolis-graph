@@ -15,7 +15,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/jdudmesh/propolis/internal/bloom"
 	"github.com/jdudmesh/propolis/internal/graph"
@@ -31,12 +30,13 @@ import (
 
 var httpClient *http.Client
 var nodeID string
+var filter *bloom.Filter
 
 type Peer interface {
 	Run() error
 	CountOfPeers() (int, error)
 	PublishIdentity(id *identity.Identity) error
-	Publish(id *identity.Identity, action string) error
+	Execute(id *identity.Identity, action string) error
 }
 
 func main() {
@@ -90,6 +90,8 @@ func main() {
 		panic(err)
 	}
 
+	filter.Set([]byte(id.Identifier))
+
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
@@ -100,17 +102,17 @@ func main() {
 		}
 	}()
 
-	for {
-		n, err := peer.CountOfPeers()
-		if err != nil {
-			panic(err)
-		}
-		fmt.Printf("Number of peers: %d\n", n)
-		if n > 0 {
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
+	// for {
+	// 	n, err := peer.CountOfPeers()
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+	// 	fmt.Printf("Number of peers: %d\n", n)
+	// 	if n > 0 {
+	// 		break
+	// 	}
+	// 	time.Sleep(1 * time.Second)
+	// }
 
 	err = peer.PublishIdentity(id)
 	if err != nil {
@@ -142,7 +144,7 @@ func createPeer() (Peer, error) {
 		Seeds:           []string{"127.0.0.1:9000"},
 	}
 
-	filter := bloom.New()
+	filter = bloom.New()
 	filter.Set([]byte("hello"))
 
 	peer, err := node.New(config, filter)
@@ -172,7 +174,7 @@ func PublishIdentity(peer Peer, id *identity.Identity) error {
 	sb.WriteString(strings.Join(props, ", "))
 	sb.WriteString("})")
 
-	err = peer.Publish(id, sb.String())
+	err = peer.Execute(id, sb.String())
 	if err != nil {
 		return err
 	}

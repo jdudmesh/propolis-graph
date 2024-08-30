@@ -6,7 +6,19 @@ import (
 )
 
 const (
-	ContentTypeHeader = "Content-Type"
+	MaxBodySize = 1048576
+
+	HeaderRemoteAddress = "x-propolis-remote-address"
+	HeaderActionID      = "x-propolis-action-id"
+	HeaderNodeID        = "x-propolis-node-id"
+	HeaderSender        = "x-propolis-sender"
+	HeaderSignature     = "x-propolis-signature"
+	HeaderIdentifier    = "x-propolis-identifier"
+	HeaderReceivedBy    = "x-propolis-received-by"
+	HeaderContentType   = "Content-Type"
+
+	SelfRemoteAddress = "0.0.0.0"
+	MaxPeers          = 3
 
 	ContentTypeError     = "x-propolis/error"
 	ContentTypePing      = "x-propolis/ping"
@@ -33,4 +45,8 @@ type Config struct {
 	NodeDatabaseURL string
 	Type            NodeType
 	Identity        identity.Identity
+}
+
+type Graph interface {
+	Execute(action graph.Action) (any, error)
 }

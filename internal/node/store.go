@@ -28,6 +28,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	"github.com/jdudmesh/propolis/pkg/migrate/v4/source/reflect"
 
+	"github.com/jdudmesh/propolis/internal/graph"
 	"github.com/jdudmesh/propolis/internal/model"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/mattn/go-sqlite3"
@@ -90,7 +91,9 @@ func createSchema(db *sqlx.DB) error {
 			created_at datetime not null,
 			updated_at datetime null,
 			action text not null,
-			remote_addr text not null
+			remote_addr text not null,
+			identity text not null,
+			received_by test not null
 		);`,
 
 		ActionsIdx1_up: `create index idx_actions_peer on actions(remote_addr);`,
@@ -214,7 +217,8 @@ func (s *store) GetRandomPeers(excluding string, maxPeers int) ([]*model.PeerSpe
 	rows, err := s.db.Queryx(`select *
 		from peers
 		where remote_addr != ?
-		order by coalesce(updated_at, created_at) limit ?;`, excluding, maxPeers)
+		order by coalesce(updated_at, created_at) desc
+		limit ?;`, excluding, maxPeers)
 
 	if err != nil {
 		return nil, fmt.Errorf("random peers: %w", err)
@@ -359,11 +363,11 @@ func (s *store) GetCachedCertificate(identifier string) (*x509.Certificate, erro
 	return cert, nil
 }
 
-func (s *store) CreateAction(action Action) error {
-	_, err := s.db.Exec(`
-		insert into actions (id, created_at, action, remote_addr)
-		values(?, ?, ?, ?)
-	`, action.ID, time.Now().UTC(), action.Action, action.RemoteAddr)
+func (s *store) CreateAction(action graph.Action) error {
+	_, err := s.db.NamedExec(`
+		insert into actions (id, timestamp, action, remote_addr, identity, received_by)
+		values(:id, :timestamp, :action, :remote_addr, :identity, :received_by)
+	`, &action)
 	return err
 }
 

@@ -4,6 +4,7 @@ go 1.22.0
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8
+	github.com/bits-and-blooms/bitset v1.14.2
 	github.com/btcsuite/btcutil v1.0.2
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/go-sql-driver/mysql v1.8.1

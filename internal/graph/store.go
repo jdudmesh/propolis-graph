@@ -12,7 +12,8 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-const defaultTimeout = 10 * time.Second
+// TODO: change timeout for production
+const defaultTimeout = 86400 * time.Second
 
 type store struct {
 	db *sqlx.DB
@@ -58,13 +59,16 @@ func createSchema(db *sqlx.DB) error {
 		Nodes_up: `create table nodes (
 			id text not null primary key,
 			created_at datetime not null,
-			updated_at datetime null
+			updated_at datetime null,
+			owner_id text not null,
+			last_action_id text not null
 		);`,
 
 		NodeAttributes_up: `create table node_attributes (
 			id text not null primary key,
 			created_at datetime not null,
 			updated_at datetime null,
+			last_action_id text not null,
 			node_id text not null,
 			attr_name text not null,
 			attr_value text not null,
@@ -78,6 +82,7 @@ func createSchema(db *sqlx.DB) error {
 			id text not null primary key,
 			created_at datetime not null,
 			updated_at datetime null,
+			last_action_id text not null,
 			node_id text not null,
 			label text not null,
 			foreign key(node_id) references nodes(id)
@@ -89,6 +94,8 @@ func createSchema(db *sqlx.DB) error {
 			id text not null primary key,
 			created_at datetime not null,
 			updated_at datetime null,
+			owner_id text not null,
+			last_action_id text not null,
 			left_node_id text not null,
 			right_node_id text not null,
 			direction int not null,
@@ -102,6 +109,7 @@ func createSchema(db *sqlx.DB) error {
 			id text not null primary key,
 			created_at datetime not null,
 			updated_at datetime null,
+			last_action_id text not null,
 			relation_id text not null,
 			attr_name text not null,
 			attr_value text not null,
@@ -115,6 +123,7 @@ func createSchema(db *sqlx.DB) error {
 			id text not null primary key,
 			created_at datetime not null,
 			updated_at datetime null,
+			last_action_id text not null,
 			relation_id text not null,
 			label text not null,
 			foreign key(relation_id) references relations(id)

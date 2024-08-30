@@ -91,14 +91,17 @@ const (
 	EntityTypeNode EntityType = iota
 	EntityTypeRelation
 	EntityTypeMergeCmd
+	EntityTypeDeleteCmd
 	EntityTypeMatchCmd
 )
 
 type entity struct {
-	typ        EntityType
-	identifier string
-	labels     []string
-	attributes map[string]Attribute
+	typ          EntityType
+	ownerID      string
+	lastActionID string
+	identifier   string
+	labels       []string
+	attributes   map[string]Attribute
 }
 
 type node struct {

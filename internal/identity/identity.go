@@ -91,6 +91,12 @@ func (s *identityService) createCredentials(id *Identity) error {
 
 	id.CertificateData = certDER
 
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("parsing certificate: %w", err)
+	}
+	id.Certificate = cert
+
 	pubKeyItem := &KeyItem{
 		ID:        model.NewID(),
 		CreatedAt: id.CreatedAt,

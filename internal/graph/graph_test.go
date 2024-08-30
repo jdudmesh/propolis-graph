@@ -40,7 +40,12 @@ func TestExecutorCRUD(t *testing.T) {
 		assert.NoError(err)
 		assert.NotNil(e)
 
-		res, err := e.Execute(p.Command())
+		action := Action{
+			ID:       "12345.67890",
+			Identity: "11111111",
+			Command:  p.Command(),
+		}
+		res, err := e.Execute(action)
 		assert.NoError(err)
 		assert.NotNil(p.Command())
 		assert.IsType(&Relation{}, res)
@@ -49,13 +54,18 @@ func TestExecutorCRUD(t *testing.T) {
 		ids = append(ids, res.(*Relation).RightNodeID)
 	})
 
-	t.Run("update", func(t *testing.T) {
+	t.Run("update - with perms", func(t *testing.T) {
 		// make sure previous insert found
 		e, err := New(config)
 		assert.NoError(err)
 		assert.NotNil(e)
 
-		res, err := e.Execute(p.Command())
+		action := Action{
+			ID:       "12345.67890",
+			Identity: "11111111",
+			Command:  p.Command(),
+		}
+		res, err := e.Execute(action)
 		assert.NoError(err)
 		assert.NotNil(res)
 		assert.IsType(&Relation{}, res)
@@ -64,6 +74,21 @@ func TestExecutorCRUD(t *testing.T) {
 		assert.Equal(ids[2], res.(*Relation).RightNodeID)
 	})
 
+	t.Run("update - without perms", func(t *testing.T) {
+		// make sure previous insert found
+		e, err := New(config)
+		assert.NoError(err)
+		assert.NotNil(e)
+
+		action := Action{
+			ID:       "12345.67890",
+			Identity: "22222222",
+			Command:  p.Command(),
+		}
+		res, err := e.Execute(action)
+		assert.ErrorIs(err, ErrUnauthorized)
+		assert.Nil(res)
+	})
 }
 
 func TestExecutorSearch(t *testing.T) {
@@ -78,7 +103,11 @@ func TestExecutorSearch(t *testing.T) {
 	assert.NoError(err)
 	assert.NotNil(e)
 
-	_, err = e.Execute(p.Command())
+	action := Action{
+		ID:      "12345.67890",
+		Command: p.Command(),
+	}
+	_, err = e.Execute(action)
 	assert.NoError(err)
 
 	now := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
@@ -93,7 +122,11 @@ func TestExecutorSearch(t *testing.T) {
 		assert.NoError(err)
 		assert.NotNil(e)
 
-		res, err := e.Execute(p.Command())
+		action2 := Action{
+			ID:      "12345.67890",
+			Command: p.Command(),
+		}
+		res, err := e.Execute(action2)
 		assert.NoError(err)
 		assert.NotNil(res)
 	})
