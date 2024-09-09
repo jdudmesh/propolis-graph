@@ -299,32 +299,25 @@ func (n *node) runLoopPeer() error {
 }
 
 func (n *node) processAction(action graph.Action) {
+	err := n.store.CreateAction(action)
+	if err != nil {
+		n.logger.Error("saving action", "error", err)
+	}
+
 	res, err := n.executor.Execute(action)
 	if err != nil {
 		n.logger.Error("executing action", "error", err)
 	}
+
 	n.logger.Debug("action executed", "result", res)
-	// propagate action to peers
-	// for _, entityID := range res.EntityIDs {
-	// 	go n.propagateAction(action, entityIDs...)
-	// }
+	entityIDs := []string{}
+	switch res.(type) {
+	case *graph.Node:
+		entityIDs = append(entityIDs, res.(*graph.Node).ID)
+	}
 
-	// // action is relevant to this node if any of the entity IDs are in the subscription filter
-	// // TODO: for now all command must have an explicit identifier for each node
-	// entityIDs := parser.Identifiers()
-	// if len(entityIDs) == 0 {
-	// 	n.logger.Warn("no identifiers found")
-	// 	w.WriteHeader(http.StatusBadRequest)
-	// 	return
-	// }
-	// isRelevant := false
-	// for _, id := range entityIDs {
-	// 	if n.subscriptions.Intersects([]byte(id)) {
-	// 		isRelevant = true
-	// 		break
-	// 	}
-	// }
-
+	//propagate action to peers
+	n.propagateAction(action, entityIDs...)
 }
 
 func (n *node) runLoopSeed() error {
@@ -568,16 +561,12 @@ func (n *node) handleExecute(w http.ResponseWriter, req *http.Request) {
 		sb.WriteString(action.ReceivedBy)
 		sb.WriteRune(';')
 	}
+
 	sb.WriteString(fmt.Sprintf("by=%s,from=%s,on=%s",
 		n.nodeID,
 		action.RemoteAddr,
 		action.Timestamp.Format(time.RFC3339)))
 	action.ReceivedBy = sb.String()
-
-	err = n.store.CreateAction(action)
-	if err != nil {
-		n.logger.Error("storing action", "error", err, "action", action)
-	}
 
 	parser, err := ast.Parse(action.Action)
 	if err != nil {
@@ -588,7 +577,6 @@ func (n *node) handleExecute(w http.ResponseWriter, req *http.Request) {
 		}
 		return
 	}
-
 	action.Command = parser.Command()
 
 	err = n.moderateAction(&action)
@@ -605,7 +593,7 @@ func (n *node) handleExecute(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	n.logger.Debug("action accepted", "action", action)
 
-	n.actionQueue <- action
+	go n.processAction(action)
 }
 
 func (n *node) handlePing(w http.ResponseWriter, req *http.Request) {
@@ -947,6 +935,11 @@ func (n *node) PublishIdentity(id *identity.Identity) error {
 }
 
 func (n *node) Execute(id *identity.Identity, stmt string) error {
+	parser, err := ast.Parse(stmt)
+	if err != nil {
+		return fmt.Errorf("send action: parsing action: %w", err)
+	}
+
 	signer, err := identity.NewSigner(id)
 	if err != nil {
 		return fmt.Errorf("creating signer: %w", err)
@@ -972,36 +965,10 @@ func (n *node) Execute(id *identity.Identity, stmt string) error {
 		Action:           stmt,
 		ReceivedBy:       recvBy,
 		EncodedSignature: encodedSig,
+		Command:          parser.Command(),
 	}
 
-	err = n.store.CreateAction(action)
-	if err != nil {
-		return fmt.Errorf("send action: saving action: %w", err)
-	}
-
-	n.actionQueue <- action
-
-	ctx, cancelFn := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancelFn()
-
-	peers, err := n.store.GetAllPeers()
-	if err != nil {
-		return fmt.Errorf("getting peers: %w", err)
-	}
-
-	if len(peers) == 0 {
-		n.logger.Warn("no peers found")
-	}
-
-	wg := sync.WaitGroup{}
-	for _, peer := range peers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			n.dispatchAction(ctx, peer, action)
-		}()
-	}
-	wg.Wait()
+	go n.processAction(action)
 
 	return nil
 }

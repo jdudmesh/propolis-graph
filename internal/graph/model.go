@@ -25,15 +25,15 @@ import (
 
 type Action struct {
 	ID               string            `db:"id"`
+	Timestamp        time.Time         `db:"timestamp"`
+	Action           string            `db:"action"`
 	RemoteAddr       string            `db:"remote_addr"`
 	NodeID           string            `db:"node_id"`
 	Identity         string            `db:"identity"`
-	Certificate      *x509.Certificate `db:"-"`
-	Timestamp        time.Time         `db:"timestamp"`
-	Action           string            `db:"action"`
-	Command          ast.Command       `db:"-"`
 	ReceivedBy       string            `db:"received_by"`
-	EncodedSignature string            `db:"encoded_signature"`
+	EncodedSignature string            `db:"encoded_sig"`
+	Certificate      *x509.Certificate `db:"-"`
+	Command          ast.Command       `db:"-"`
 }
 
 type Node struct {

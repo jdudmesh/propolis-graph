@@ -88,12 +88,13 @@ func createSchema(db *sqlx.DB) error {
 
 		Actions_up: `create table actions (
 			id text not null primary key,
-			created_at datetime not null,
-			updated_at datetime null,
+			timestamp datetime not null,
 			action text not null,
 			remote_addr text not null,
+			node_id text not null,
 			identity text not null,
-			received_by test not null
+			received_by text not null,
+			encoded_sig text not null
 		);`,
 
 		ActionsIdx1_up: `create index idx_actions_peer on actions(remote_addr);`,
@@ -365,8 +366,8 @@ func (s *store) GetCachedCertificate(identifier string) (*x509.Certificate, erro
 
 func (s *store) CreateAction(action graph.Action) error {
 	_, err := s.db.NamedExec(`
-		insert into actions (id, timestamp, action, remote_addr, identity, received_by)
-		values(:id, :timestamp, :action, :remote_addr, :identity, :received_by)
+		insert into actions (id, timestamp, action, remote_addr, node_id, identity, received_by, encoded_sig)
+		values(:id, :timestamp, :action, :remote_addr, :node_id, :identity, :received_by, :encoded_sig)
 	`, &action)
 	return err
 }
